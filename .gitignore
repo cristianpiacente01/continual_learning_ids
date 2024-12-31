@@ -1,0 +1,14 @@
+# Virtual environment
+/venv
+
+# Ignore all __pycache__ directories
+**/__pycache__
+
+# Ignore all Luigi logs
+**/luigi.log
+
+# Ignore the datasets folder files
+/datasets/*
+
+# ... except for the download link in the README.txt
+!datasets/README.txt
