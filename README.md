@@ -1,6 +1,6 @@
 # Master's thesis about CL for IDS
 
-Repository containing a pipeline with experiments for my Master's thesis about Continual Learning in the Intrusion Detection Systems domain.
+Repository containing pipelines for preparing data and experimenting for my Master's thesis about Continual Learning in the Intrusion Detection Systems domain.
 
 Cristian Piacente 866020 @ University of Milan - Bicocca
 
@@ -91,7 +91,11 @@ To quit the virtual environment, it's sufficient to execute the command
 
 #### Execution (TODO)
 
-With the virtual environment activated in the repository root, to execute the Luigi pipeline run the following commands:
+##### DATA PREPARATION PIPELINE
 
- 1.     cd pipeline
- 2.     python -m luigi --module pipeline Test --hello "testing the param value" --local-scheduler
+With the virtual environment activated in the repository root, to execute the Data Preparation pipeline run the following commands:
+
+ 1.     cd data_prep_pipeline
+ 2.     python -m luigi --module pipeline MergeFiles --dataset-name "CIC-IDS2017" --input-file-extension ".parquet" --local-scheduler
+
+ where the parameters are `--dataset-name`, `--input-file-extension`.

@@ -5,7 +5,7 @@
 List of datasets with their download link:
 
 � NSL-KDD
-https://www.kaggle.com/datasets/hassan06/nslkdd
+https://www.kaggle.com/datasets/hassan06/nslkdd (.txt was converted to .csv and I added the header manually)
 
 � LYCOS-IDS2017
 http://maupiti.univ-lemans.fr:2443/lycos/lycos-ids2017/src/65b9f2fea8195b8c5220ae1a4191d03ea65619bb (you must build the dataset starting from CIC-IDS2017, using the repo instructions and scripts)
