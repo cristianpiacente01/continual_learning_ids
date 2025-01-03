@@ -48,7 +48,7 @@ To quit the virtual environment, it's sufficient to execute the command
 **Inputs**: 
 
 - dataset name (used for identifying the datasets folder, make sure you downloaded it from the [GDrive](https://drive.google.com/drive/folders/1auey1u1GrCB29wmuOXzskXgjSdlHo5f8?usp=sharing))
-- file extension to consider (csv/parquet/txt, used to identify the correct files in the folder)
+- file extension to consider (.csv/.parquet, used to identify the correct files in the folder)
 - int threshold parameter (see 2a. in "Steps", default=3000)
 - parameters for preprocessing:
     - list parameter of features to drop (default=[])
@@ -67,13 +67,14 @@ To quit the virtual environment, it's sufficient to execute the command
 
 ###### Preprocessing steps
 
-- automatic creation of columns attack, attack_type
+- automatic creation of columns attack_type, attack
 - drop features in a list parameter
 - drop constant features
 - drop attack types in a list parameter
 - data cleaning (drop duplicates, fix missing values, inf values, negative values)
-- encoding for categorical features 
-- casting types properly
+- casting int types properly
+- encoding for categorical features
+- casting bool types properly 
 
 ##### EXPERIMENTING PIPELINE
 
@@ -93,9 +94,31 @@ To quit the virtual environment, it's sufficient to execute the command
 
 ##### DATA PREPARATION PIPELINE
 
-With the virtual environment activated in the repository root, to execute the Data Preparation pipeline run the following commands:
+With the virtual environment activated in the repository root, to execute the Data Preparation pipeline here are some examples.
 
- 1.     cd data_prep_pipeline
- 2.     python -m luigi --module pipeline MergeFiles --dataset-name "CIC-IDS2017" --input-file-extension ".parquet" --local-scheduler
+The parameters are `--dataset-name`, `--input-file-extension`, `--features-to-drop`, `--attack-types-to-drop`.
 
- where the parameters are `--dataset-name`, `--input-file-extension`.
+The first command is common for every dataset: change the working directory to `data_prep_pipeline` with
+
+    cd data_prep_pipeline
+
+###### For CIC-IDS2017
+
+    python3 -m luigi --module pipeline SplitDistributions --dataset-name "CIC-IDS2017" --input-file-extension ".parquet" --features-to-drop "[\"flow_id\", \"src_addr\", \"src_port\", \"dst_addr\", \"dst_port\", \"timestamp\"]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
+
+###### For CSE-CIC-IDS2018
+
+    python3 -m luigi --module pipeline SplitDistributions --dataset-name "CSE-CIC-IDS2018" --input-file-extension ".csv" --features-to-drop "[\"Dst Port\", \"Timestamp\"]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
+
+###### For LYCOS-IDS2017
+
+    python3 -m luigi --module pipeline SplitDistributions --dataset-name "LYCOS-IDS2017" --input-file-extension ".parquet" --features-to-drop "[\"flow_id\", \"src_addr\", \"src_port\", \"dst_addr\", \"dst_port\", \"timestamp\"]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
+
+###### For NSL-KDD
+
+    python3 -m luigi --module pipeline SplitDistributions --dataset-name "NSL-KDD" --input-file-extension ".csv" --features-to-drop "[]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
+
+###### For UNSW-NB15
+
+    python3 -m luigi --module pipeline SplitDistributions --dataset-name "UNSW-NB15" --input-file-extension ".csv" --features-to-drop "[\"id\"]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
+
