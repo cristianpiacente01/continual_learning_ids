@@ -81,9 +81,12 @@ To quit the virtual environment, it's sufficient to execute the command
 
 **Steps**:
 
-6a. Baseline modeling and evaluation on the full dataset (i.e. use the whole dataset as the only task, skipping 2. and 3.)
-6b. Modeling and evaluation on each task (simulate a real-time data stream), without catastrophic forgetting --> incrementally train (without storing the previous train sets) and predict on the union of all test sets up to the current task (Continual Learning while checking the ability of retaining past knowledge)
-7. use the OoD data for testing generalization capabilities
+6. 
+    a. Baseline modeling and evaluation on the full dataset (i.e., use the whole dataset as the only task, skipping 2. and 3.)
+    b. Modeling and evaluation on each task (simulate a real-time data stream), without catastrophic forgetting:
+        - Incrementally train (without storing the previous train sets)
+        - Predict on the union of all test sets up to the current task (Continual Learning while checking the ability of retaining past knowledge)
+7. Use the OoD data for testing generalization capabilities
 
 
 #### Execution (TODO)
