@@ -96,7 +96,7 @@ To quit the virtual environment, it's sufficient to execute the command
 
 With the virtual environment activated in the repository root, to execute the Data Preparation pipeline here are some examples.
 
-The parameters are `--dataset-name`, `--input-file-extension`, `--features-to-drop`, `--attack-types-to-drop`.
+The parameters are `--dataset-name`, `--input-file-extension`, `--features-to-drop`, `--attack-types-to-drop`, `--threshold`.
 
 The first command is common for every dataset: change the working directory to `data_prep_pipeline` with
 
@@ -104,21 +104,21 @@ The first command is common for every dataset: change the working directory to `
 
 ###### For CIC-IDS2017
 
-    python3 -m luigi --module pipeline SplitDistributions --dataset-name "CIC-IDS2017" --input-file-extension ".parquet" --features-to-drop "[\"flow_id\", \"src_addr\", \"src_port\", \"dst_addr\", \"dst_port\", \"timestamp\"]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
+    python3 -m luigi --module pipeline SplitAndNormalizeTasks --dataset-name "CIC-IDS2017" --input-file-extension ".parquet" --features-to-drop "[\"flow_id\", \"src_addr\", \"src_port\", \"dst_addr\", \"dst_port\", \"timestamp\"]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
 
 ###### For CSE-CIC-IDS2018
 
-    python3 -m luigi --module pipeline SplitDistributions --dataset-name "CSE-CIC-IDS2018" --input-file-extension ".csv" --features-to-drop "[\"Dst Port\", \"Timestamp\"]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
+    python3 -m luigi --module pipeline SplitAndNormalizeTasks --dataset-name "CSE-CIC-IDS2018" --input-file-extension ".csv" --features-to-drop "[\"Dst Port\", \"Timestamp\"]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
 
 ###### For LYCOS-IDS2017
 
-    python3 -m luigi --module pipeline SplitDistributions --dataset-name "LYCOS-IDS2017" --input-file-extension ".parquet" --features-to-drop "[\"flow_id\", \"src_addr\", \"src_port\", \"dst_addr\", \"dst_port\", \"timestamp\"]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
+    python3 -m luigi --module pipeline SplitAndNormalizeTasks --dataset-name "LYCOS-IDS2017" --input-file-extension ".parquet" --features-to-drop "[\"flow_id\", \"src_addr\", \"src_port\", \"dst_addr\", \"dst_port\", \"timestamp\"]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
 
 ###### For NSL-KDD
 
-    python3 -m luigi --module pipeline SplitDistributions --dataset-name "NSL-KDD" --input-file-extension ".csv" --features-to-drop "[]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
+    python3 -m luigi --module pipeline SplitAndNormalizeTasks --dataset-name "NSL-KDD" --input-file-extension ".csv" --features-to-drop "[]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
 
 ###### For UNSW-NB15
 
-    python3 -m luigi --module pipeline SplitDistributions --dataset-name "UNSW-NB15" --input-file-extension ".csv" --features-to-drop "[\"id\"]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
+    python3 -m luigi --module pipeline SplitAndNormalizeTasks --dataset-name "UNSW-NB15" --input-file-extension ".csv" --features-to-drop "[\"id\"]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
 
