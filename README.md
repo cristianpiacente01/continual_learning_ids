@@ -139,8 +139,10 @@ The first command is common for every dataset: change the working directory to `
 
     cd experiments_pipeline
 
-###### Full-Dataset Random Forest Classifier
+###### Full-Dataset Random Forest (Multi / Binary)
 
-    python3 -m luigi --module pipeline FullDatasetRF --dataset-name "CIC-IDS2017" --tuning-min-samples-split "[2, 5, 10]" --tuning-min-samples-leaf "[1, 2, 4]" --tuning-iterations 10 --local-scheduler
+Use the parameter `--target` as "multi" for multi-classification, else "binary".
 
-###### TODO Multi-Classification experiments + Continual Learning experiments + OoD
+    python3 -m luigi --module pipeline FullDatasetRF --dataset-name "CIC-IDS2017" --target "multi" --tuning-min-samples-split "[2, 5, 10]" --tuning-min-samples-leaf "[1, 2, 4]" --tuning-iterations 10 --local-scheduler
+
+###### TODO Continual Learning experiments + OoD

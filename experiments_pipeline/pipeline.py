@@ -44,10 +44,11 @@ def get_full_model_rel_path(dataset_name, suffix):
 
 class FullDatasetRF(luigi.Task):
     """
-    Random Forest binary classification on the full dataset
+    Random Forest binary or multi (depending on a parameter) classification on the full dataset
     """
 
     dataset_name = luigi.Parameter()
+    target = luigi.Parameter(default="binary") # binary/multi
     tuning_min_samples_split = luigi.ListParameter(default=(2, 5, 10)) # Used for tuning
     tuning_min_samples_leaf = luigi.ListParameter(default=(1, 2, 4)) # Used for tuning
     tuning_iterations = luigi.IntParameter(default=10) # Used for tuning
@@ -65,6 +66,14 @@ class FullDatasetRF(luigi.Task):
     def run(self):
         logger.info(f'Started task {self.__class__.__name__}')
 
+        # Flag that is True if multi-classification, False if binary
+        multi = self.target.lower().startswith("multi")
+
+        # Classification Type
+        classification_type = "MULTI" if multi else "BINARY"
+
+        logger.info(f'Type of classification: {classification_type}')
+
         # Read preprocessed.csv
         df = pd.read_csv(self.input().path)
 
@@ -72,13 +81,13 @@ class FullDatasetRF(luigi.Task):
 
         # Extract features and labels
         X = df.drop(columns=["attack", "attack_type"]) # Features
-        y = df["attack"] # Binary labels for binary classification
+        y = df["attack_type" if multi else "attack"] # Target for classification
 
         ##### --- FROM FULL DATASET TO NORMALIZED TRAIN, VAL, TEST --- #####
 
-        # Split into train, val and test (60-20-20)
-        X_train, X_remainder, y_train, y_remainder = train_test_split(X, y, test_size=0.4, random_state=42, stratify=y)
-        X_val, X_test, y_val, y_test = train_test_split(X_remainder, y_remainder, test_size=0.5, random_state=42, stratify=y_remainder)
+        # Split into train, val and test (60-20-20) without stratifying
+        X_train, X_remainder, y_train, y_remainder = train_test_split(X, y, test_size=0.4, random_state=42)
+        X_val, X_test, y_val, y_test = train_test_split(X_remainder, y_remainder, test_size=0.5, random_state=42)
 
         logger.info(f'Split task into train ({len(X_train)}), val ({len(X_val)}), and test ({len(X_test)})')
 
@@ -138,25 +147,29 @@ class FullDatasetRF(luigi.Task):
 
         # Evaluate the best model on the test set
         y_test_pred = best_model.predict(X_test)
-        y_test_proba = best_model.predict_proba(X_test)[:, 1] # For AUROC calculation
+
+        # Average parameter for scores
+        average = "macro" if multi else "binary"
 
         accuracy = accuracy_score(y_test, y_test_pred)
-        precision = precision_score(y_test, y_test_pred)
-        recall = recall_score(y_test, y_test_pred)
-        f1 = f1_score(y_test, y_test_pred)
-        auroc = roc_auc_score(y_test, y_test_proba)
+        precision = precision_score(y_test, y_test_pred, average=average)
+        recall = recall_score(y_test, y_test_pred, average=average)
+        f1 = f1_score(y_test, y_test_pred, average=average)
+        
 
         logger.info(f'Evaluation metrics:')
         logger.info(f'-> Accuracy: {accuracy}')
         logger.info(f'-> Precision: {precision}')
         logger.info(f'-> Recall: {recall}')
         logger.info(f'-> F1-Score: {f1}')
-        logger.info(f'-> AUROC: {auroc}')
 
         ##### --- SAVE THE MODEL AND METRICS --- #####
 
+        # Parametric model name
+        model_name = f'Full-Dataset_RF_{classification_type}'
+
         model_folder = get_full_model_rel_path(self.dataset_name, '')
-        model_file = os.path.join(model_folder, 'full_dataset_RF_model.pkl') # model name is here
+        model_file = os.path.join(model_folder, f'{model_name}_model.pkl')
         metrics_csv = get_full_model_rel_path(self.dataset_name, cfg['metrics_rel_filename'])
 
         # Create the folders if they don't exist
@@ -170,11 +183,11 @@ class FullDatasetRF(luigi.Task):
 
         # Create a DataFrame for the metrics
         metrics_df = pd.DataFrame([{
+            "model_name": model_name,
             "accuracy": accuracy,
             "precision": precision,
             "recall": recall,
             "f1_score": f1,
-            "auroc": auroc,
             "best_hyperparameters": str(best_params),
         }])
 
@@ -188,4 +201,3 @@ class FullDatasetRF(luigi.Task):
         logger.info(f'Finished task {self.__class__.__name__}')
 
 
-        
