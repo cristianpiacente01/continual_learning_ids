@@ -12,3 +12,6 @@
 
 # ... except for the download link in the README.txt
 !datasets/README.txt
+
+# Ignore the models folder files
+/models/*

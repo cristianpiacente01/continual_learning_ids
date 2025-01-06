@@ -39,9 +39,9 @@ To quit the virtual environment, it's sufficient to execute the command
 
     deactivate
 
-### Pipeline (TODO)
+### Pipeline
 
-#### Design (TODO)
+#### Design
 
 ##### DATA PREPARATION PIPELINE
 
@@ -78,9 +78,13 @@ To quit the virtual environment, it's sufficient to execute the command
 
 ##### EXPERIMENTING PIPELINE
 
-**Inputs to be defined**, for sure the data preparation pipeline's outputs
+**Inputs**: 
 
-**Steps**:
+- the data preparation pipeline must have been executed
+- the dataset name (used for identifying the datasets folder + creating one in the models folder)
+- hyperparameters for tuning (see examples in the sections below)
+
+**Steps (TODO)**:
 
 6. 
     a. Baseline modeling and evaluation on the full dataset (i.e., use the whole dataset as the only task, skipping 2. and 3.) \
@@ -90,7 +94,7 @@ To quit the virtual environment, it's sufficient to execute the command
 7. Use the OoD data for testing generalization capabilities
 
 
-#### Execution (TODO)
+#### Execution
 
 ##### DATA PREPARATION PIPELINE
 
@@ -122,3 +126,21 @@ The first command is common for every dataset: change the working directory to `
 
     python3 -m luigi --module pipeline SplitAndNormalizeTasks --dataset-name "UNSW-NB15" --input-file-extension ".csv" --features-to-drop "[\"id\"]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
 
+
+##### EXPERIMENTS PIPELINE
+
+With the virtual environment activated in the repository root, to execute the Experiments pipeline here are some examples.
+
+Please note that this pipeline must be executed **after** the Data Preparation pipeline, in order to have the input files.
+
+The examples are shown for the dataset CIC-IDS2017, but they have been tested with **any** dataset.
+
+The first command is common for every dataset: change the working directory to `experiments_pipeline` with
+
+    cd experiments_pipeline
+
+###### Full-Dataset Random Forest Classifier
+
+    python3 -m luigi --module pipeline FullDatasetRF --dataset-name "CIC-IDS2017" --tuning-min-samples-split "[2, 5, 10]" --tuning-min-samples-leaf "[1, 2, 4]" --tuning-iterations 10 --local-scheduler
+
+###### TODO Multi-Classification experiments + Continual Learning experiments + OoD

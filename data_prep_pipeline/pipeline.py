@@ -13,16 +13,17 @@ logging.basicConfig(filename='luigi.log', level=logging.INFO,
 logger = logging.getLogger('data-prep-pipeline')
 
 # Get configuration file
+luigi.configuration.LuigiConfigParser.add_config_path("../luigi.cfg")
 config = luigi.configuration.get_config()
 
 # Dict that contains the parameters configurated in luigi.cfg
 paths = {
-    'datasets_folder': config.get('Paths', 'datasets_folder'),
-    'merged_rel_filename': config.get('Paths', 'merged_rel_filename'),
-    'preprocessed_rel_filename': config.get('Paths', 'preprocessed_rel_filename'),
-    'closed_set_rel_filename': config.get('Paths', 'closed_set_rel_filename'),
-    'ood_rel_filename': config.get('Paths', 'ood_rel_filename'),
-    'tasks_rel_folder': config.get('Paths', 'tasks_rel_folder'), 
+    'datasets_folder': config.get('DataPreparationPipeline', 'datasets_folder'),
+    'merged_rel_filename': config.get('DataPreparationPipeline', 'merged_rel_filename'),
+    'preprocessed_rel_filename': config.get('DataPreparationPipeline', 'preprocessed_rel_filename'),
+    'closed_set_rel_filename': config.get('DataPreparationPipeline', 'closed_set_rel_filename'),
+    'ood_rel_filename': config.get('DataPreparationPipeline', 'ood_rel_filename'),
+    'tasks_rel_folder': config.get('DataPreparationPipeline', 'tasks_rel_folder'), 
 }
 
 # Specific dataset folder
@@ -291,11 +292,13 @@ class SplitDistributions(luigi.Task):
     def requires(self):
         # preprocessed.csv is needed
         return Preprocessing(dataset_name=self.dataset_name,
-                             input_file_extension=self.input_file_extension)
+                             input_file_extension=self.input_file_extension,
+                             features_to_drop=self.features_to_drop,
+                             attack_types_to_drop=self.attack_types_to_drop)
 
 
     def run(self):
-        logger.info(f"Started task {self.__class__.__name__}")
+        logger.info(f'Started task {self.__class__.__name__}')
 
         # Load the preprocessed dataset
         df = pd.read_csv(self.input().path)
@@ -365,7 +368,7 @@ class CreateTasks(luigi.Task):
 
 
     def run(self):
-        logger.info(f"Started task {self.__class__.__name__}")
+        logger.info(f'Started task {self.__class__.__name__}')
 
         # Load the Closed-Set dataset
         df = pd.read_csv(self.input()['closed_set'].path)
@@ -474,18 +477,18 @@ class SplitAndNormalizeTasks(luigi.Task):
             val_df[columns_to_normalize] = (val_df[columns_to_normalize] - mean) / std
             test_df[columns_to_normalize] = (test_df[columns_to_normalize] - mean) / std
 
-            logger.info(f"Normalized columns for task {task_file}")
+            logger.info(f'Normalized columns for task {task_file}')
 
             # Create a folder for the current task
-            task_id = os.path.basename(task_file).replace("task_", "").replace(".csv", "")
+            task_id = os.path.basename(task_file).replace('task_', '').replace('.csv', '')
             task_folder = os.path.join(self.input().path, task_id)
             os.makedirs(task_folder, exist_ok=True)
 
             # Save splits to the task folder
-            train_df.to_csv(os.path.join(task_folder, "train.csv"), index=False)
-            val_df.to_csv(os.path.join(task_folder, "val.csv"), index=False)
-            test_df.to_csv(os.path.join(task_folder, "test.csv"), index=False)
+            train_df.to_csv(os.path.join(task_folder, 'train.csv'), index=False)
+            val_df.to_csv(os.path.join(task_folder, 'val.csv'), index=False)
+            test_df.to_csv(os.path.join(task_folder, 'test.csv'), index=False)
 
-            logger.info(f"Saved train, val, and test splits for task {task_id}")
+            logger.info(f'Saved train, val, and test splits for task {task_id}')
 
-        logger.info(f"Task splitting and normalization completed successfully")
+        logger.info(f'Task splitting and normalization completed successfully')
