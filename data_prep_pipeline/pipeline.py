@@ -23,6 +23,7 @@ paths = {
     'preprocessed_rel_filename': config.get('DataPreparationPipeline', 'preprocessed_rel_filename'),
     'closed_set_rel_filename': config.get('DataPreparationPipeline', 'closed_set_rel_filename'),
     'ood_rel_filename': config.get('DataPreparationPipeline', 'ood_rel_filename'),
+    'split_closed_set_rel_folder': config.get('DataPreparationPipeline', 'split_closed_set_rel_folder'),
     'tasks_rel_folder': config.get('DataPreparationPipeline', 'tasks_rel_folder'), 
 }
 
@@ -347,11 +348,11 @@ class SplitDistributions(luigi.Task):
 
 
 
-class CreateTasks(luigi.Task):
+class SplitClosedSet(luigi.Task):
     """
-    Split the Closed-Set distribution into tasks, each one with balanced samples of benign flows and 1 attack type flows
+    Split the Closed-Set dataset into train, val, and test sets (60-20-20%).
     """
-
+    
     dataset_name = luigi.Parameter()
     input_file_extension = luigi.Parameter()
     features_to_drop = luigi.ListParameter(default=())
@@ -359,7 +360,7 @@ class CreateTasks(luigi.Task):
     threshold = luigi.IntParameter(default=3000)
 
     def requires(self):
-        # closed_set is needed
+        # The Closed-Set is needed
         return SplitDistributions(dataset_name=self.dataset_name,
                                   input_file_extension=self.input_file_extension,
                                   features_to_drop=self.features_to_drop,
@@ -375,59 +376,29 @@ class CreateTasks(luigi.Task):
 
         logger.info(f'Loaded Closed-Set dataset from {self.input()["closed_set"].path}')
 
-        # Separate benign and attack samples
-        benign_df = df[df['attack'] == False]
-        attack_dfs = {attack_type: df[df['attack_type'] == attack_type]
-                      for attack_type in df['attack_type'].unique() 
-                      if attack_type.lower() != 'benign' and attack_type.lower() != 'normal'}
+        # Split into train (60%), val (20%), and test (20%)
+        train_df, remainder_df = train_test_split(df, test_size=0.4, random_state=42, stratify=df['attack'])
+        val_df, test_df = train_test_split(remainder_df, test_size=0.5, random_state=42, stratify=remainder_df['attack'])
 
-        logger.info(f'Number of benign samples: {len(benign_df)}')
+        logger.info(f'Split dataset into train ({len(train_df)}), val ({len(val_df)}), test ({len(test_df)})')
 
-        logger.info(f'Attack types: {list(attack_dfs.keys())}')
-
-        # Determine the number of samples for each task based on the smallest attack class
-        min_samples = min(len(attack_df) for attack_df in attack_dfs.values())
-
-        logger.info(f'Number of samples per class for balancing: {min_samples}')
-
-        # Shuffle benign_df once and split it into disjoint chunks
-        shuffled_benign_df = benign_df.sample(frac=1, random_state=42).reset_index(drop=True)
-        benign_chunks = [
-            shuffled_benign_df.iloc[i * min_samples:(i + 1) * min_samples]
-            for i in range(len(attack_dfs))
-        ]
-
-        # Create the output path directory if it doesn't exist
+        # Save splits
         os.makedirs(self.output().path, exist_ok=True)
+        train_df.to_csv(os.path.join(self.output().path, 'train.csv'), index=False)
+        val_df.to_csv(os.path.join(self.output().path, 'val.csv'), index=False)
+        test_df.to_csv(os.path.join(self.output().path, 'test.csv'), index=False)
 
-        # Create tasks
-        for idx, (attack_type, attack_df) in enumerate(attack_dfs.items()):
-            # Use the corresponding chunk of benign samples
-            task_benign_df = benign_chunks[idx]
-
-            # Randomly undersample from the attack class
-            task_attack_df = attack_df.sample(n=min_samples, random_state=42)
-
-            # Combine benign and attack samples into a single task
-            task_df = pd.concat([task_benign_df, task_attack_df], ignore_index=True)
-
-            # Save to .csv
-            task_path = os.path.join(self.output().path, f'task_{idx + 1}.csv')
-            task_df.to_csv(task_path, index=False)
-
-            logger.info(f'Created task {idx + 1} with benign and attack type {attack_type}')
-
-        logger.info(f'Tasks successfully created in directory {self.output().path}')
+        logger.info(f'Dataset split into train-val-test successfully in directory {self.output().path}')
 
 
     def output(self):
-        return DirectoryTarget(get_full_rel_path(self.dataset_name, paths['tasks_rel_folder']))
+        return DirectoryTarget(get_full_rel_path(self.dataset_name, paths['split_closed_set_rel_folder']))
 
 
 
-class SplitAndNormalizeTasks(luigi.Task):
+class CreateTasks(luigi.Task):
     """
-    Split each task into train-val-test (60-20-20%) and normalize per-task using the train set
+    Create tasks from the train set with different sampling strategies.
     """
 
     dataset_name = luigi.Parameter()
@@ -435,60 +406,92 @@ class SplitAndNormalizeTasks(luigi.Task):
     features_to_drop = luigi.ListParameter(default=())
     attack_types_to_drop = luigi.ListParameter(default=())
     threshold = luigi.IntParameter(default=3000)
+    sampling_strategy = luigi.Parameter(default='natural') # 'natural', 'balanced_attacks', 'fully_balanced'
 
     def requires(self):
-        # The tasks are needed
-        return CreateTasks(dataset_name=self.dataset_name,
-                           input_file_extension=self.input_file_extension,
-                           features_to_drop=self.features_to_drop,
-                           attack_types_to_drop=self.attack_types_to_drop,
-                           threshold=self.threshold)
+        # Train, validation and test are needed
+        return SplitClosedSet(dataset_name=self.dataset_name,
+                              input_file_extension=self.input_file_extension,
+                              features_to_drop=self.features_to_drop,
+                              attack_types_to_drop=self.attack_types_to_drop,
+                              threshold=self.threshold)
 
 
     def run(self):
         logger.info(f'Started task {self.__class__.__name__}')
 
-        # Process each task csv file
-        task_files = glob.glob(f'{self.input().path}/*.csv')
-        for task_file in task_files:
-            logger.info(f'Processing task file: {task_file}')
+        # Load the train dataset
+        train_df = pd.read_csv(os.path.join(self.input().path, 'train.csv'))
 
-            # Load the task DataFrame
-            task_df = pd.read_csv(task_file)
+        logger.info(f'Loaded train set from {self.input().path}/train.csv')
 
-            # Split into train, val, and test (60-20-20)
-            train_df, remainder_df = train_test_split(task_df, test_size=0.4, random_state=42, stratify=task_df['attack'])
-            val_df, test_df = train_test_split(remainder_df, test_size=0.5, random_state=42, stratify=remainder_df['attack'])
+        # Columns list to normalize later
+        columns_to_normalize = train_df.select_dtypes(include=['float', 'int']).columns
 
-            logger.info(f'Split task into train ({len(train_df)}), val ({len(val_df)}), and test ({len(test_df)})')
+        # Separate benign and attack samples
+        benign_df = train_df[train_df['attack'] == False]
+        attack_dfs = {attack_type: train_df[train_df['attack_type'] == attack_type]
+                      for attack_type in train_df['attack_type'].unique() 
+                      if attack_type.lower() != 'benign' and attack_type.lower() != 'normal'}
 
-            # Identify columns to normalize
-            float_columns = train_df.select_dtypes(include=['float']).columns
-            high_cardinality_int_columns = [col for col in train_df.select_dtypes(include=['int']).columns if train_df[col].nunique() > 10]
-            columns_to_normalize = list(float_columns) + high_cardinality_int_columns
+        logger.info(f'Number of benign samples: {len(benign_df)}')
 
-            logger.info(f'Applying Z-Score normalization on columns {columns_to_normalize}')
+        logger.info(f'Attack types: {list(attack_dfs.keys())}')
 
-            # Z-Score normalization using train, for each chosen column individually
-            mean = train_df[columns_to_normalize].mean()
-            std = train_df[columns_to_normalize].std()
+        # Define minimum attack samples for eventually balancing
+        min_attack_samples = min(len(attack_df) for attack_df in attack_dfs.values())
+        logger.info(f'Number of samples per attack type: {min_attack_samples}')
 
-            train_df[columns_to_normalize] = (train_df[columns_to_normalize] - mean) / std
-            val_df[columns_to_normalize] = (val_df[columns_to_normalize] - mean) / std
-            test_df[columns_to_normalize] = (test_df[columns_to_normalize] - mean) / std
+        # Shuffle benign_df once
+        shuffled_benign_df = benign_df.sample(frac=1, random_state=42).reset_index(drop=True)
 
-            logger.info(f'Normalized columns for task {task_file}')
+        # Split benign samples into disjoint chunks, one per task
+        benign_chunks = np.array_split(shuffled_benign_df, len(attack_dfs))
 
-            # Create a folder for the current task
-            task_id = os.path.basename(task_file).replace('task_', '').replace('.csv', '')
-            task_folder = os.path.join(self.input().path, task_id)
-            os.makedirs(task_folder, exist_ok=True)
+        # Create the output path directory if it doesn't exist
+        os.makedirs(self.output().path, exist_ok=True)
 
-            # Save splits to the task folder
-            train_df.to_csv(os.path.join(task_folder, 'train.csv'), index=False)
-            val_df.to_csv(os.path.join(task_folder, 'val.csv'), index=False)
-            test_df.to_csv(os.path.join(task_folder, 'test.csv'), index=False)
+        # Log the strategy
+        if self.sampling_strategy == 'balanced_attacks':
+            logger.info('Using the balanced attacks strategy for sampling: balance only attack samples, across all tasks')
+        elif self.sampling_strategy == 'fully_balanced':
+            logger.info('Using the fully balanced strategy for sampling: balance both attack samples and benign, across all tasks')
+        else: # natural
+            logger.info('Using the natural strategy for sampling: no balancing at all')
 
-            logger.info(f'Saved train, val, and test splits for task {task_id}')
+        # Create tasks
+        for idx, (attack_type, attack_df) in enumerate(attack_dfs.items()):
+            # Use the corresponding chunk of benign samples
+            task_benign_df = benign_chunks[idx]
 
-        logger.info(f'Task splitting and normalization completed successfully')
+            # Apply the sampling strategy
+            if self.sampling_strategy == 'balanced_attacks':
+                task_attack_df = attack_df.sample(n=min_attack_samples, random_state=42) # Balance only attack samples
+            elif self.sampling_strategy == 'fully_balanced':
+                task_benign_df = task_benign_df.sample(n=min_attack_samples, random_state=42) # Balance benign too
+                task_attack_df = attack_df.sample(n=min_attack_samples, random_state=42)
+            else: # natural
+                task_attack_df = attack_df # No balancing, take all available attack samples
+
+            # Combine benign and attack samples into a single task
+            task_df = pd.concat([task_benign_df, task_attack_df], ignore_index=True)
+
+            # Compute per-task normalization
+            task_mean = task_df[columns_to_normalize].mean()
+            task_std = task_df[columns_to_normalize].std()
+
+            # Normalize the task
+            task_df[columns_to_normalize] = (task_df[columns_to_normalize] - task_mean) / task_std
+
+            # Save to .csv
+            task_path = os.path.join(self.output().path, f'task_{idx + 1}.csv')
+            
+            task_df.to_csv(task_path, index=False)
+
+            logger.info(f'Created task {idx + 1} with attack type {attack_type} with class counts: \n{task_df["attack_type"].value_counts()}')
+
+        logger.info(f'Tasks successfully created in directory {self.output().path}')
+
+
+    def output(self):
+        return DirectoryTarget(get_full_rel_path(self.dataset_name, paths['tasks_rel_folder']))

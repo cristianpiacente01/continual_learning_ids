@@ -92,9 +92,7 @@ class FullDatasetRF(luigi.Task):
         logger.info(f'Split task into train ({len(X_train)}), val ({len(X_val)}), and test ({len(X_test)})')
 
         # Identify columns to normalize
-        float_columns = X_train.select_dtypes(include=['float']).columns
-        high_cardinality_int_columns = [col for col in X_train.select_dtypes(include=['int']).columns if X_train[col].nunique() > 10]
-        columns_to_normalize = list(float_columns) + high_cardinality_int_columns
+        columns_to_normalize = X_train.select_dtypes(include=['float', 'int']).columns
 
         logger.info(f'Applying Z-Score normalization on columns {columns_to_normalize}')
 
@@ -162,6 +160,7 @@ class FullDatasetRF(luigi.Task):
         logger.info(f'-> Precision: {precision}')
         logger.info(f'-> Recall: {recall}')
         logger.info(f'-> F1-Score: {f1}')
+        #TODO if binary AUC-ROC
 
         ##### --- SAVE THE MODEL AND METRICS --- #####
 
