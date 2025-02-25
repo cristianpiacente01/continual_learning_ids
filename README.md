@@ -53,6 +53,7 @@ To quit the virtual environment, it's sufficient to execute the command
 - parameters for preprocessing:
     - list parameter of features to drop (default=[])
     - list parameter of attack types to drop (default=[])
+- the sampling strategy used in the training set among all tasks ("natural", "balanced_attacks" or "fully_balanced")
 
 **Steps**:
 
@@ -61,9 +62,9 @@ To quit the virtual environment, it's sufficient to execute the command
 2. Split into two distributions: 
     2a. Top classes (including benign) where number of samples >= threshold parameter (e.g. 3000), i.e. **Closed-Set** multi-classification (known classes)
     2b. The rest where we set the labels to "unknown", i.e. **Out-of-Distribution** binary classification (0-day attacks) 
-3. Split 2a. into tasks (batches), each one with the same number (based on the minority class from 2a.) of benign flows and 1 attack type flows
-4. Split each task into train-val-test (60-20-20%)
-5. Normalization per-task, using the train
+3. Split 2a. (Closed-Set) into training (60%), validation (20%) and test set (20%)
+4. Create tasks (batches) using the training set, each one with benign flows and 1 attack type flows, where sampling could be applied depending on the input parameter: if **"natural"**, no balancing is performed and for each task we use all the available attack samples w.r.t that class; if **"balanced_attacks"** every task will have the same number of attack samples using the minority class; if **"fully_balanced"** benign flows are balanced per task too, using the same number
+5. Normalization per-task
 
 ###### Preprocessing steps
 
@@ -87,10 +88,10 @@ To quit the virtual environment, it's sufficient to execute the command
 **Steps (TODO)**:
 
 6. 
-    a. Baseline modeling and evaluation on the full dataset (i.e., use the whole dataset as the only task, skipping 2. and 3.) \
-    b. Modeling and evaluation on each task (simulate a real-time data stream), without catastrophic forgetting: \
-        - Incrementally train (without storing the previous train sets) \
-        - Predict on the union of all test sets up to the current task (Continual Learning while checking the ability of retaining past knowledge)
+    a. Baseline modeling and evaluation on the full Closed-Set (i.e., use the split dataset from 3.) \
+    b. (TODO) Modeling on each task from train (simulate a real-time data stream), without catastrophic forgetting: \
+        - Incrementally train (without storing the previous data) \
+        - Evaluate on the validation set and predict on the test set (Continual Learning while checking the ability of retaining past knowledge)
 7. Use the OoD data for testing generalization capabilities
 
 
@@ -100,7 +101,7 @@ To quit the virtual environment, it's sufficient to execute the command
 
 With the virtual environment activated in the repository root, to execute the Data Preparation pipeline here are some examples.
 
-The parameters are `--dataset-name`, `--input-file-extension`, `--features-to-drop`, `--attack-types-to-drop`, `--threshold`.
+The parameters are `--dataset-name`, `--input-file-extension`, `--features-to-drop`, `--attack-types-to-drop`, `--threshold`, `--sampling-strategy`.
 
 The first command is common for every dataset: change the working directory to `data_prep_pipeline` with
 
@@ -108,23 +109,23 @@ The first command is common for every dataset: change the working directory to `
 
 ###### For CIC-IDS2017
 
-    python3 -m luigi --module pipeline SplitAndNormalizeTasks --dataset-name "CIC-IDS2017" --input-file-extension ".parquet" --features-to-drop "[\"flow_id\", \"src_addr\", \"src_port\", \"dst_addr\", \"dst_port\", \"timestamp\"]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
+    python3 -m luigi --module pipeline CreateTasks --dataset-name "CIC-IDS2017" --input-file-extension ".parquet" --features-to-drop "[\"flow_id\", \"src_addr\", \"src_port\", \"dst_addr\", \"dst_port\", \"timestamp\"]" --attack-types-to-drop "[]" --threshold 3000 --sampling-strategy "natural" --local-scheduler
 
 ###### For CSE-CIC-IDS2018
 
-    python3 -m luigi --module pipeline SplitAndNormalizeTasks --dataset-name "CSE-CIC-IDS2018" --input-file-extension ".csv" --features-to-drop "[\"Dst Port\", \"Timestamp\"]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
+    python3 -m luigi --module pipeline CreateTasks --dataset-name "CSE-CIC-IDS2018" --input-file-extension ".csv" --features-to-drop "[\"Dst Port\", \"Timestamp\"]" --attack-types-to-drop "[]" --threshold 3000 --sampling-strategy "natural" --local-scheduler
 
 ###### For LYCOS-IDS2017
 
-    python3 -m luigi --module pipeline SplitAndNormalizeTasks --dataset-name "LYCOS-IDS2017" --input-file-extension ".parquet" --features-to-drop "[\"flow_id\", \"src_addr\", \"src_port\", \"dst_addr\", \"dst_port\", \"timestamp\"]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
+    python3 -m luigi --module pipeline CreateTasks --dataset-name "LYCOS-IDS2017" --input-file-extension ".parquet" --features-to-drop "[\"flow_id\", \"src_addr\", \"src_port\", \"dst_addr\", \"dst_port\", \"timestamp\"]" --attack-types-to-drop "[]" --threshold 3000 --sampling-strategy "natural" --local-scheduler
 
 ###### For NSL-KDD
 
-    python3 -m luigi --module pipeline SplitAndNormalizeTasks --dataset-name "NSL-KDD" --input-file-extension ".csv" --features-to-drop "[]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
+    python3 -m luigi --module pipeline CreateTasks --dataset-name "NSL-KDD" --input-file-extension ".csv" --features-to-drop "[]" --attack-types-to-drop "[]" --threshold 3000 --sampling-strategy "natural" --local-scheduler
 
 ###### For UNSW-NB15
 
-    python3 -m luigi --module pipeline SplitAndNormalizeTasks --dataset-name "UNSW-NB15" --input-file-extension ".csv" --features-to-drop "[\"id\"]" --attack-types-to-drop "[]" --threshold 3000 --local-scheduler
+    python3 -m luigi --module pipeline CreateTasks --dataset-name "UNSW-NB15" --input-file-extension ".csv" --features-to-drop "[\"id\"]" --attack-types-to-drop "[]" --threshold 3000 --sampling-strategy "natural" --local-scheduler
 
 
 ##### EXPERIMENTS PIPELINE
