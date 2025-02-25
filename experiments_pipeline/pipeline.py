@@ -25,6 +25,7 @@ cfg = {
     'preprocessed_rel_filename': config.get('DataPreparationPipeline', 'preprocessed_rel_filename'),
     'closed_set_rel_filename': config.get('DataPreparationPipeline', 'closed_set_rel_filename'),
     'ood_rel_filename': config.get('DataPreparationPipeline', 'ood_rel_filename'),
+    'split_closed_set_rel_folder': config.get('DataPreparationPipeline', 'split_closed_set_rel_folder'),
     'tasks_rel_folder': config.get('DataPreparationPipeline', 'tasks_rel_folder'), 
 
     'models_folder': config.get('ExperimentsPipeline', 'models_folder'),
@@ -42,6 +43,23 @@ def get_full_model_rel_path(dataset_name, suffix):
     return f'{cfg["models_folder"]}/{dataset_name}/{suffix}'
 
 
+class DirectoryTarget(luigi.Target):
+    """
+    Luigi Target for checking the existence of a directory
+    """
+    
+    def __init__(self, path):
+        self.path = path
+
+    # Luigi's complete method override
+    def complete(self):
+        return os.path.isdir(self.path)
+
+    # Luigi's complete method override
+    def exists(self):
+        return os.path.isdir(self.path)
+
+
 class FullDatasetRF(luigi.Task):
     """
     Random Forest binary or multi (depending on a parameter) classification on the full dataset
@@ -54,11 +72,11 @@ class FullDatasetRF(luigi.Task):
     tuning_iterations = luigi.IntParameter(default=10) # Used for tuning
 
     def requires(self):
-        # preprocessed.csv is needed
+        # Train, validation and test are needed 
         class FakeTask(luigi.Task):
             def output(_):
-                return luigi.LocalTarget(get_full_dataset_rel_path(self.dataset_name, 
-                                                                   cfg['preprocessed_rel_filename']))
+                return DirectoryTarget(get_full_dataset_rel_path(self.dataset_name,
+                                                                 cfg['split_closed_set_rel_folder']))
 
         return FakeTask()
 
@@ -74,23 +92,31 @@ class FullDatasetRF(luigi.Task):
 
         logger.info(f'Type of classification: {classification_type}')
 
-        # Read preprocessed.csv
-        df = pd.read_csv(self.input().path)
+        # Load the train dataset
+        train_df = pd.read_csv(os.path.join(self.input().path, 'train.csv'))
 
-        logger.info(f'Retrieved the preprocessed full dataset')
+        logger.info(f'Loaded train set from {self.input().path}/train.csv')
 
-        # Extract features and labels
-        X = df.drop(columns=["attack", "attack_type"]) # Features
-        y = df["attack_type" if multi else "attack"] # Target for classification
+        # Load the validation dataset
+        val_df = pd.read_csv(os.path.join(self.input().path, 'val.csv'))
 
-        ##### --- FROM FULL DATASET TO NORMALIZED TRAIN, VAL, TEST --- #####
+        logger.info(f'Loaded validation set from {self.input().path}/val.csv')
 
-        # Split into train, val and test (60-20-20) without stratifying
-        X_train, X_remainder, y_train, y_remainder = train_test_split(X, y, test_size=0.4, random_state=42)
-        X_val, X_test, y_val, y_test = train_test_split(X_remainder, y_remainder, test_size=0.5, random_state=42)
+        # Load the test dataset
+        test_df = pd.read_csv(os.path.join(self.input().path, 'test.csv'))
 
-        logger.info(f'Split task into train ({len(X_train)}), val ({len(X_val)}), and test ({len(X_test)})')
+        logger.info(f'Loaded test set from {self.input().path}/test.csv')
 
+        # Extract features
+        X_train = train_df.drop(columns=["attack", "attack_type"])
+        X_val = val_df.drop(columns=["attack", "attack_type"])
+        X_test = test_df.drop(columns=["attack", "attack_type"])
+
+        # Extract labels (Target for classification)
+        y_train = train_df["attack_type" if multi else "attack"]
+        y_val = val_df["attack_type" if multi else "attack"]
+        y_test = test_df["attack_type" if multi else "attack"]
+        
         # Identify columns to normalize
         columns_to_normalize = X_train.select_dtypes(include=['float', 'int']).columns
 
