@@ -118,7 +118,7 @@ class FullDatasetRF(luigi.Task):
         y_test = test_df["attack_type" if multi else "attack"]
         
         # Identify columns to normalize
-        columns_to_normalize = X_train.select_dtypes(include=['float', 'int']).columns
+        columns_to_normalize = list(X_train.select_dtypes(include=['float', 'int']).columns)
 
         logger.info(f'Applying Z-Score normalization on columns {columns_to_normalize}')
 
@@ -135,7 +135,6 @@ class FullDatasetRF(luigi.Task):
         ##### --- HYPERPARAMETER TUNING --- #####
 
         # Define hyperparameter search space
-        rf = RandomForestClassifier(random_state=42)
         param_distributions = {
             "n_estimators": [500], # From the paper Machine_Learning_based_Intrusion_Detection_Systems for_IoT_Applications.pdf
             "max_depth": [26], # From the paper Machine_Learning_based_Intrusion_Detection_Systems for_IoT_Applications.pdf
@@ -179,14 +178,19 @@ class FullDatasetRF(luigi.Task):
         precision = precision_score(y_test, y_test_pred, average=average)
         recall = recall_score(y_test, y_test_pred, average=average)
         f1 = f1_score(y_test, y_test_pred, average=average)
-        
 
         logger.info(f'Evaluation metrics:')
         logger.info(f'-> Accuracy: {accuracy}')
         logger.info(f'-> Precision: {precision}')
         logger.info(f'-> Recall: {recall}')
         logger.info(f'-> F1-Score: {f1}')
-        #TODO if binary AUC-ROC
+        # If binary then calculate AUROC
+        if average == "binary":
+            y_test_proba = best_model.predict_proba(X_test)[:, 1]
+            auc_roc = roc_auc_score(y_test, y_test_proba)
+            logger.info(f'-> AUROC: {auc_roc}')
+        else:
+            auc_roc = None # No AUROC for multi-classification
 
         ##### --- SAVE THE MODEL AND METRICS --- #####
 
@@ -213,6 +217,7 @@ class FullDatasetRF(luigi.Task):
             "precision": precision,
             "recall": recall,
             "f1_score": f1,
+            "roc_auc": auc_roc if auc_roc is not None else "N/A (Multi)",
             "best_hyperparameters": str(best_params),
         }])
 
