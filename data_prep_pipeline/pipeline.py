@@ -426,7 +426,7 @@ class CreateTasks(luigi.Task):
         logger.info(f'Loaded train set from {self.input().path}/train.csv')
 
         # Columns list to normalize later
-        columns_to_normalize = train_df.select_dtypes(include=['float', 'int']).columns
+        columns_to_normalize = list(train_df.select_dtypes(include=['float', 'int']).columns)
 
         # Separate benign and attack samples
         benign_df = train_df[train_df['attack'] == False]
