@@ -136,7 +136,7 @@ Please note that this pipeline must be executed **after** the Data Preparation p
 
 The examples are shown for the dataset CIC-IDS2017, but they have been tested with **any** dataset.
 
-The first command is common for every dataset: change the working directory to `experiments_pipeline` with
+The first command is common for every experiment: change the working directory to `experiments_pipeline` with
 
     cd experiments_pipeline
 
@@ -145,5 +145,11 @@ The first command is common for every dataset: change the working directory to `
 Use the parameter `--target` as "multi" for multi-classification, else "binary".
 
     python3 -m luigi --module pipeline FullDatasetRF --dataset-name "CIC-IDS2017" --target "multi" --tuning-min-samples-split "[2, 5, 10]" --tuning-min-samples-leaf "[1, 2, 4]" --tuning-iterations 10 --local-scheduler
+
+###### Full-Dataset Supervised Gaussian Mixture Models
+
+`--tuning-max-components` is the max number of mixture components representing a single attack type: for each class a GMM model is tuned.
+
+    python3 -m luigi --module pipeline FullDatasetSupervisedGMM --dataset-name "CIC-IDS2017" --tuning-max-components 3 --local-scheduler
 
 ###### TODO Continual Learning experiments + OoD
