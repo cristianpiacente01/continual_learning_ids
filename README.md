@@ -14,21 +14,21 @@ First of all, it's necessary to create a Python virtual environment and to insta
 
 Using the repository **root directory** as the working directory, execute the following command to **create the virtual environment**:
 
-    python -m venv venv
+    python3 -m venv venv
 
 Once the virtual environment has been created, it will be saved in the filesystem, so it won't be necessary to recreate it every time.
 
 Now, it's possible to **activate it** with
 
-    source ./venv/Scripts/activate
+    source ./venv/bin/activate
 
-Please note: if you are on Windows, remove `source` from the command.
+Please note: if you are on Windows, remove `source` from the command and use `Scripts` instead of `bin`.
 
 #### Installing the dependencies
 
 After the **first activation**, it's necessary to **install all the needed libraries** by executing
 
-    pip install -r requirements.txt
+    pip3 install -r requirements.txt
 
 Once the dependencies have been installed, it won't be necessary anymore for the future activations.
 With the virtual environment activated, it's possible to execute the different parts of the project, described in the other sections.

@@ -1,5 +1,13 @@
 ! IMPORTANT: DOWNLOAD THIS FOLDER'S CONTENT FROM https://drive.google.com/drive/folders/1auey1u1GrCB29wmuOXzskXgjSdlHo5f8?usp=sharing !
 
+PRO TIP - To download it all from Linux terminal: 
+
+    pip3 install gdown 
+    cd datasets
+    gdown --folder --output ./ "https://drive.google.com/drive/folders/1auey1u1GrCB29wmuOXzskXgjSdlHo5f8"
+    mv datasets/* ./
+    rm -rf datasets/
+
 ---
 
 List of datasets with their download link:
