@@ -148,8 +148,16 @@ Use the parameter `--target` as "multi" for multi-classification, else "binary".
 
 ###### Full-Dataset Supervised Gaussian Mixture Models
 
-`--tuning-max-components` is the max number of mixture components representing a single attack type: for each class a GMM model is tuned.
+`--attack-only` is a flag used for filtering only attack data when true (by default false).
 
-    python3 -m luigi --module pipeline FullDatasetSupervisedGMM --dataset-name "CIC-IDS2017" --tuning-max-components 3 --local-scheduler
+`--train-percentage` is an integer representing the percentage of the training data to consider (by default 100).
+
+`--tuning-max-components` is the max number of mixture components representing a single attack type: for each class a GMM model is tuned (by default 3).
+
+`--covariance-type` is a string describing the type of covariance parameters to use, which must be "full" or "tied" or "diag" or "spherical" (by default "full").
+
+`--reg-covar` is the non-negative regularization added to the diagonal of covariance (by default 1e-6).
+
+    python3 -m luigi --module pipeline FullDatasetSupervisedGMM --dataset-name "CIC-IDS2017" --attack-only false --train-percentage 100 --tuning-max-components 3 --covariance-type "full" --reg-covar 1e-6 --local-scheduler
 
 ###### TODO Continual Learning experiments + OoD

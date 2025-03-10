@@ -8,6 +8,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import ParameterSampler
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 import pickle
+from sklearn.model_selection import train_test_split
 
 
 # Set up logger
@@ -238,7 +239,11 @@ class FullDatasetSupervisedGMM(luigi.Task):
     """
 
     dataset_name = luigi.Parameter()
+    attack_only = luigi.BoolParameter(default=False, parsing=luigi.BoolParameter.EXPLICIT_PARSING) # Filter only attack data
+    train_percentage = luigi.IntParameter(default=100) # Percentage of training data to use
     tuning_max_components = luigi.IntParameter(default=3) # Used for tuning
+    covariance_type = luigi.Parameter(default="full") # Type of covariance matrix
+    reg_covar = luigi.FloatParameter(default=1e-6) # Regularization for covariance matrix
 
     def requires(self):
         # Train, validation and test are needed 
@@ -252,6 +257,14 @@ class FullDatasetSupervisedGMM(luigi.Task):
 
     def run(self):
         logger.info(f'Started task {self.__class__.__name__}')
+
+        logger.info('====== PARAMETERS ======')
+        logger.info(f'attack_only={self.attack_only}')
+        logger.info(f'train_percentage={self.train_percentage}')
+        logger.info(f'tuning_max_components={self.tuning_max_components}')
+        logger.info(f'covariance_type={self.covariance_type}')
+        logger.info(f'reg_covar={self.reg_covar}')
+        logger.info('========================')
 
         # Load the train dataset
         train_df = pd.read_csv(os.path.join(self.input().path, 'train.csv'))
@@ -267,6 +280,17 @@ class FullDatasetSupervisedGMM(luigi.Task):
         test_df = pd.read_csv(os.path.join(self.input().path, 'test.csv'))
 
         logger.info(f'Loaded test set from {self.input().path}/test.csv')
+
+        if self.attack_only:
+            train_df = train_df[train_df['attack'] == True]
+            val_df = val_df[val_df['attack'] == True]
+            test_df = test_df[test_df['attack'] == True]
+            logger.info(f'Filtered only attack data: train={len(train_df)}, val={len(val_df)}, test={len(test_df)}')
+
+        # Apply percentage-based sampling on training set
+        if self.train_percentage > 0 and self.train_percentage < 100:
+            train_df, _ = train_test_split(train_df, train_size=self.train_percentage / 100, stratify=train_df["attack"], random_state=42)
+            logger.info(f'Using only {self.train_percentage}% of training data: {len(train_df)} samples')
 
         # Extract features
         X_train = train_df.drop(columns=["attack", "attack_type"])
@@ -314,7 +338,10 @@ class FullDatasetSupervisedGMM(luigi.Task):
             best_aic = np.inf
 
             for n_components in range(1, self.tuning_max_components + 1):
-                gmm = GaussianMixture(n_components=n_components, random_state=42)
+                gmm = GaussianMixture(n_components=n_components, 
+                                      covariance_type=self.covariance_type,
+                                      reg_covar=self.reg_covar, 
+                                      random_state=42)
                 gmm.fit(X_train_class)
                 aic = gmm.aic(X_val_class)
 
@@ -351,7 +378,7 @@ class FullDatasetSupervisedGMM(luigi.Task):
 
         ##### --- SAVE MODEL AND METRICS --- #####
 
-        model_name = 'Full-Dataset_SupervisedGMM'
+        model_name = f'Full-Dataset_SupervisedGMM{"_AttackOnly" if self.attack_only else ""}_{self.train_percentage}%'
 
         model_folder = get_full_model_rel_path(self.dataset_name, '')
         model_file = os.path.join(model_folder, f'{model_name}_model.pkl')
@@ -374,8 +401,15 @@ class FullDatasetSupervisedGMM(luigi.Task):
             "recall": recall,
             "f1_score": f1,
             "roc_auc": "N/A (Multi)",
-            # best_hyperparameters: how many components for each attack type
-            "best_hyperparameters": str({attack_type: class_gmms[class_idx].n_components for attack_type, class_idx in attack_mapping.items()}),
+            # best_hyperparameters: input params and how many components for each attack type
+            "best_hyperparameters": str({
+                "covariance_type": self.covariance_type,
+                "reg_covar": self.reg_covar,
+                "n_components_per_attack": {
+                    attack_type: class_gmms[class_idx].n_components 
+                    for attack_type, class_idx in attack_mapping.items()
+                }
+            }),
         }])
 
         # Append the data to metrics.csv
