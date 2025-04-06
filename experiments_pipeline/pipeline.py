@@ -239,11 +239,29 @@ class FullDatasetSupervisedGMM(luigi.Task):
     """
 
     dataset_name = luigi.Parameter()
-    attack_only = luigi.BoolParameter(default=False, parsing=luigi.BoolParameter.EXPLICIT_PARSING) # Filter only attack data
-    train_percentage = luigi.IntParameter(default=100) # Percentage of training data to use
-    tuning_max_components = luigi.IntParameter(default=3) # Used for tuning
-    covariance_type = luigi.Parameter(default="full") # Type of covariance matrix
-    reg_covar = luigi.FloatParameter(default=1e-6) # Regularization for covariance matrix
+
+    # Filter only attack data
+    attack_only = luigi.BoolParameter(default=False, parsing=luigi.BoolParameter.EXPLICIT_PARSING) 
+
+    # Percentage of training data to use
+    train_percentage = luigi.IntParameter(default=100) 
+
+    # Max number of components that can be used globally to represent attack types
+    # If tune_n_components is false, the number is fixed, else it's the upper bound (tuning starting from 1)
+    max_components = luigi.IntParameter(default=3)
+
+    # Type of covariance matrix
+    covariance_type = luigi.Parameter(default="full")
+
+    # Regularization for covariance matrix
+    reg_covar = luigi.FloatParameter(default=1e-6)
+
+    # Decide whether to tune the number of components globally in GMMs or not, by default yes
+    tune_n_components = luigi.BoolParameter(default=True, parsing=luigi.BoolParameter.EXPLICIT_PARSING)
+
+    # Metric (AIC, f1_score or accuracy) used for tuning on validation set if tune_n_components is true
+    # If not tuning, it's calculated once since the number of components is fixed
+    selection_metric = luigi.Parameter(default="AIC")
 
     def requires(self):
         # Train, validation and test are needed 
@@ -261,9 +279,11 @@ class FullDatasetSupervisedGMM(luigi.Task):
         logger.info('====== PARAMETERS ======')
         logger.info(f'attack_only={self.attack_only}')
         logger.info(f'train_percentage={self.train_percentage}')
-        logger.info(f'tuning_max_components={self.tuning_max_components}')
+        logger.info(f'max_components={self.max_components}')
         logger.info(f'covariance_type={self.covariance_type}')
         logger.info(f'reg_covar={self.reg_covar}')
+        logger.info(f'tune_n_components={self.tune_n_components}')
+        logger.info(f'selection_metric={self.selection_metric}')
         logger.info('========================')
 
         # Load the train dataset
@@ -326,45 +346,65 @@ class FullDatasetSupervisedGMM(luigi.Task):
 
         logger.info(f'Normalized columns')
 
-        ##### --- TRAIN A SEPARATE GMM FOR EACH CLASS --- #####
-        class_gmms = {}
+        ##### --- GLOBAL TUNING LOOP --- #####
+        best_class_gmms = None       # Dictionary of class_idx -> best GMM
+        best_score = -np.inf         # Best validation score observed so far
+        best_n_components = None     # Number of components corresponding to best_score
 
-        for attack_type in attack_types:
-            X_train_class = X_train[y_train == attack_mapping[attack_type]]
-            X_val_class = X_val[y_val == attack_mapping[attack_type]]
+        # If tuning try number of components from 1 to max_components, else just one iteration (max_components itself)
+        for n_components in range(1, self.max_components + 1) if self.tune_n_components else [self.max_components]:
+            
+            logger.info(f'Trying n_components = {n_components}')
 
-            best_model = None
-            best_n_components = None
-            best_aic = np.inf
+            class_gmms = {}
 
-            for n_components in range(1, self.tuning_max_components + 1):
-                gmm = GaussianMixture(n_components=n_components, 
+            # Train one GMM per class
+            for attack_type in attack_types:
+                class_idx = attack_mapping[attack_type]
+                X_train_class = X_train[y_train == class_idx]
+
+                gmm = GaussianMixture(n_components=n_components,
                                       covariance_type=self.covariance_type,
-                                      reg_covar=self.reg_covar, 
+                                      reg_covar=self.reg_covar,
                                       random_state=42)
                 gmm.fit(X_train_class)
-                aic = gmm.aic(X_val_class)
+                class_gmms[class_idx] = gmm
 
-                if aic < best_aic:
-                    best_aic = aic
-                    best_n_components = n_components
-                    best_model = gmm
+            # Use all GMMs to predict on validation set
+            log_likelihoods = np.zeros((X_val.shape[0], len(class_gmms)))
+            for class_idx, gmm in class_gmms.items():
+                log_likelihoods[:, class_idx] = gmm.score_samples(X_val)
+            y_val_pred = np.argmax(log_likelihoods, axis=1)
 
-                logger.info(f'Trained GMM for attack type {attack_type} with {n_components} components, AIC = {aic}')
+            # Compute validation score based on selection metric
+            if self.selection_metric.lower() == "accuracy":
+                score = accuracy_score(y_val, y_val_pred)
+            elif self.selection_metric.lower() == "f1_score":
+                score = f1_score(y_val, y_val_pred, average="macro")
+            else: # == "aic":
+                # We want to minimize AIC not maximize, so we use a negative sign
+                score = -sum(class_gmms[class_idx].aic(X_val[y_val == class_idx])
+                            for _, class_idx in attack_mapping.items())
 
-            class_gmms[attack_mapping[attack_type]] = best_model
-            logger.info(f'Attack type {attack_type}\'s best GMM has {best_n_components} components, AIC = {best_aic}')
+            if self.selection_metric.lower() == "aic":
+                logger.info(f'n_components={n_components} -> Validation AIC = {-score} (minimization)')
+            else:
+                logger.info(f'n_components={n_components} -> Validation {self.selection_metric} = {score} (maximization)')
 
-        ##### --- PREDICTION USING LOG-LIKELIHOOD --- #####
-        log_likelihoods = np.zeros((X_test.shape[0], len(class_gmms))) # (num_test_samples, num_classes)
+            # Update best model if better than previous ones
+            if score > best_score:
+                best_score = score
+                best_class_gmms = class_gmms
+                best_n_components = n_components
+                logger.info(f'Best n_components so far: {n_components}')
 
-        for class_idx, gmm in class_gmms.items():
+        ##### --- PREDICT ON TEST SET --- #####
+        log_likelihoods = np.zeros((X_test.shape[0], len(best_class_gmms)))
+        for class_idx, gmm in best_class_gmms.items():
             log_likelihoods[:, class_idx] = gmm.score_samples(X_test)
-
         y_test_pred = np.argmax(log_likelihoods, axis=1)
 
-        ##### --- EVALUATION ON TEST SET --- #####
-
+        # Compute final test metrics
         accuracy = accuracy_score(y_test, y_test_pred)
         precision = precision_score(y_test, y_test_pred, average="macro")
         recall = recall_score(y_test, y_test_pred, average="macro")
@@ -377,23 +417,21 @@ class FullDatasetSupervisedGMM(luigi.Task):
         logger.info(f'-> F1-Score: {f1}')
 
         ##### --- SAVE MODEL AND METRICS --- #####
-
-        model_name = f'Full-Dataset_SupervisedGMM{"_AttackOnly" if self.attack_only else ""}_{self.train_percentage}%'
+        model_name = f'Full-Dataset_SupervisedGMM{"_AttackOnly" if self.attack_only else ""}_{self.train_percentage}%' + \
+                    f'_{"Tune" if self.tune_n_components else "Fixed"}-{best_n_components}_{self.selection_metric}'
 
         model_folder = get_full_model_rel_path(self.dataset_name, '')
-        model_file = os.path.join(model_folder, f'{model_name}_model.pkl')
+        model_file = os.path.join(model_folder, f'{model_name}.pkl')
         metrics_csv = get_full_model_rel_path(self.dataset_name, cfg['metrics_rel_filename'])
 
         # Create the folders if they don't exist
         os.makedirs(os.path.dirname(metrics_csv), exist_ok=True)
 
-        # Save .pkl file
+        # Save model as pickle
         with open(model_file, 'wb') as f:
-            pickle.dump(best_model, f)
+            pickle.dump(best_class_gmms, f)
 
-        logger.info(f'Saved the model to {model_file}')
-
-        # Create a DataFrame for the metrics
+        # Save evaluation metrics to CSV
         metrics_df = pd.DataFrame([{
             "model_name": model_name,
             "accuracy": accuracy,
@@ -401,22 +439,17 @@ class FullDatasetSupervisedGMM(luigi.Task):
             "recall": recall,
             "f1_score": f1,
             "roc_auc": "N/A (Multi)",
-            # best_hyperparameters: input params and how many components for each attack type
             "best_hyperparameters": str({
                 "covariance_type": self.covariance_type,
                 "reg_covar": self.reg_covar,
-                "n_components_per_attack": {
-                    attack_type: class_gmms[class_idx].n_components 
-                    for attack_type, class_idx in attack_mapping.items()
-                }
+                "selection_metric": self.selection_metric,
+                "tune_components": self.tune_n_components,
+                "n_components": best_n_components
             }),
         }])
 
-        # Append the data to metrics.csv
         with open(metrics_csv, 'a') as f:
-            # The header gets written only if the csv is empty
-            metrics_df.to_csv(f, mode='a', header=f.tell()==0, index=False, lineterminator='\n')
+            metrics_df.to_csv(f, mode='a', header=f.tell() == 0, index=False, lineterminator='\n')
 
         logger.info(f'Saved the metrics to {metrics_csv}')
-
         logger.info(f'Finished task {self.__class__.__name__}')
