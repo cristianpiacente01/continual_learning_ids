@@ -331,8 +331,10 @@ class FullDatasetSupervisedGMM(luigi.Task):
 
         logger.info(f'Mapped attack types to numerical labels: {attack_mapping}')
 
-        # Identify columns to normalize
-        columns_to_normalize = list(X_train.select_dtypes(include=['float', 'int']).columns)
+        # Identify columns to normalize: numeric columns which are NOT CONSTANT in the new train
+        columns_to_normalize = [numeric_column
+                                for numeric_column in list(X_train.select_dtypes(include=['float', 'int']).columns)
+                                if X_train[numeric_column].nunique() > 1]
 
         logger.info(f'Applying Z-Score normalization on columns {columns_to_normalize}')
 
