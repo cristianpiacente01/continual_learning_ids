@@ -158,9 +158,9 @@ Use the parameter `--target` as "multi" for multi-classification, else "binary".
 
 `--reg-covar` is the non-negative regularization added to the diagonal of covariance (by default 1e-6).
 
-`--tune-n-components` is a flag used to decide whether to tune the number of components globally in GMMs or not (by default true)
+`--tune-n-components` is a flag used to decide whether to tune the number of components globally in GMMs or not (by default true).
 
-`--selection-metric` is a string describing which metric ("AIC", "f1_score" or "accuracy") to use on the validation set for tuning if `--tune-n-components` is true, else it's calculated once since the number of components is fixed (by default "AIC")
+`--selection-metric` is a string describing which metric ("AIC", "f1_score" or "accuracy") to use on the validation set for tuning if `--tune-n-components` is true, else it's calculated once since the number of components is fixed (by default "AIC").
 
     python3 -m luigi --module pipeline FullDatasetSupervisedGMM --dataset-name "CIC-IDS2017" --attack-only false --train-percentage 100 --max-components 3 --covariance-type "full" --reg-covar 1e-6 --tune-n-components false --selection-metric "AIC" --local-scheduler
 
