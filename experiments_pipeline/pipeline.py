@@ -3,6 +3,7 @@ import logging
 import os
 import pandas as pd
 import numpy as np
+import glob
 from sklearn.mixture import GaussianMixture
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import ParameterSampler
@@ -31,6 +32,7 @@ cfg = {
 
     'models_folder': config.get('ExperimentsPipeline', 'models_folder'),
     'metrics_rel_filename': config.get('ExperimentsPipeline', 'metrics_rel_filename'),
+    'continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'continual_metrics_rel_filename'),
 }
 
 # Retrieve a relative path w.r.t the dataset name in the datasets folder
@@ -190,8 +192,11 @@ class FullDatasetRF(luigi.Task):
             y_test_proba = best_model.predict_proba(X_test)[:, 1]
             auc_roc = roc_auc_score(y_test, y_test_proba)
             logger.info(f'-> AUROC: {auc_roc}')
+            f1_weighted = None # No F1 Score Weighted for binary
         else:
             auc_roc = None # No AUROC for multi-classification
+            f1_weighted = f1_score(y_test, y_test_pred, average="weighted")
+            logger.info(f'-> F1-Score Weighted: {f1_weighted}')
 
         ##### --- SAVE THE MODEL AND METRICS --- #####
 
@@ -218,6 +223,7 @@ class FullDatasetRF(luigi.Task):
             "precision": precision,
             "recall": recall,
             "f1_score": f1,
+            "f1_score_weighted": f1_weighted if f1_weighted is not None else "N/A (Binary)",
             "roc_auc": auc_roc if auc_roc is not None else "N/A (Multi)",
             "best_hyperparameters": str(best_params),
         }])
@@ -411,12 +417,15 @@ class FullDatasetSupervisedGMM(luigi.Task):
         precision = precision_score(y_test, y_test_pred, average="macro")
         recall = recall_score(y_test, y_test_pred, average="macro")
         f1 = f1_score(y_test, y_test_pred, average="macro")
+        f1_weighted = f1_score(y_test, y_test_pred, average="weighted")
 
         logger.info(f'Evaluation metrics:')
         logger.info(f'-> Accuracy: {accuracy}')
         logger.info(f'-> Precision: {precision}')
         logger.info(f'-> Recall: {recall}')
-        logger.info(f'-> F1-Score: {f1}')
+        logger.info(f'-> F1-Score (Macro): {f1}')
+        logger.info(f'-> F1-Score (Weighted): {f1_weighted}')
+        
 
         ##### --- SAVE MODEL AND METRICS --- #####
         model_name = f'Full-Dataset_SupervisedGMM{"_AttackOnly" if self.attack_only else ""}_{self.train_percentage}%' + \
@@ -440,6 +449,7 @@ class FullDatasetSupervisedGMM(luigi.Task):
             "precision": precision,
             "recall": recall,
             "f1_score": f1,
+            "f1_score_weighted": f1_weighted,
             "roc_auc": "N/A (Multi)",
             "best_hyperparameters": str({
                 "covariance_type": self.covariance_type,
@@ -454,4 +464,166 @@ class FullDatasetSupervisedGMM(luigi.Task):
             metrics_df.to_csv(f, mode='a', header=f.tell() == 0, index=False, lineterminator='\n')
 
         logger.info(f'Saved the metrics to {metrics_csv}')
+        logger.info(f'Finished task {self.__class__.__name__}')
+
+
+
+class ContinualSupervisedGMM(luigi.Task):
+    """
+    Supervised GMM for Continual Learning multi-class classification
+    """
+
+    dataset_name = luigi.Parameter()
+
+    # Type of covariance matrix
+    covariance_type = luigi.Parameter(default="full")
+
+    # Regularization for covariance matrix
+    reg_covar = luigi.FloatParameter(default=1e-6)
+
+    # Number of components used to represent each attack type, this number is fixed
+    n_components = luigi.IntParameter(default=3)
+
+    def requires(self):
+        # The "split-dataset" (val.csv and test.csv) and "tasks" folders are needed
+        class FakeTask(luigi.Task):
+            def output(_):
+                return {'split-dataset': DirectoryTarget(get_full_dataset_rel_path(self.dataset_name, 
+                                                                 cfg['split_closed_set_rel_folder'])),
+                        'tasks': DirectoryTarget(get_full_dataset_rel_path(self.dataset_name, 
+                                                                           cfg['tasks_rel_folder']))}
+            
+        return FakeTask()
+
+
+    def run(self):
+        logger.info(f'Started task {self.__class__.__name__}')
+
+        logger.info(f'====== PARAMETERS (DATASET {self.dataset_name}) ======')
+        logger.info(f'covariance_type={self.covariance_type}')
+        logger.info(f'reg_covar={self.reg_covar}')
+        logger.info(f'n_components={self.n_components}')
+        logger.info('========================')
+
+        split_path = self.input()['split-dataset'].path
+        tasks_path = self.input()['tasks'].path
+        
+        # Retrieve val.csv and test.csv from the split-dataset folder, then the csv files from the tasks folder
+        val_df = pd.read_csv(os.path.join(split_path, "val.csv"))
+        test_df = pd.read_csv(os.path.join(split_path, "test.csv"))
+        task_files = sorted(glob.glob(os.path.join(tasks_path, "task_*.csv")))
+
+        label_map = {}
+        next_class_index = 0
+        gmms = {}
+        metrics = []
+
+        for i, task_file in enumerate(task_files):
+            task_df = pd.read_csv(task_file)
+
+            current_attacks = set(task_df["attack_type"].unique()) - {"benign", "normal"}
+            assert len(current_attacks) == 1, f"Task file {task_file} must contain exactly 1 attack type"
+            current_attack = current_attacks.pop()
+
+            # Assign index if first time seeing this attack type
+            if current_attack not in label_map:
+                label_map[current_attack] = next_class_index
+                next_class_index += 1
+
+            class_idx = label_map[current_attack]
+            
+            # --- TRAINING SET FROM THE TASK CONSIDERING JUST THE CURRENT ATTACK, NO BENIGN TRAFFIC ---
+            task_df = task_df[task_df["attack_type"] == current_attack]
+            X_train = task_df.drop(columns=["attack", "attack_type"])
+            #y_train = np.full(len(X_train), class_idx)
+
+            # --- VALIDATION SET WITH JUST THE CURRENT ATTACK ---
+            val_task_df = val_df[val_df["attack_type"] == current_attack]
+            X_val = val_task_df.drop(columns=["attack", "attack_type"])
+            #y_val = np.full(len(X_val), class_idx)
+
+            # --- CUMULATIVE TEST SET WITH THE SEEN ATTACKS UP TO NOW ---
+            seen_attack_types = set(label_map.keys())
+            test_seen_df = test_df[test_df["attack_type"].isin(seen_attack_types)]
+            X_test = test_seen_df.drop(columns=["attack", "attack_type"])
+            y_test = test_seen_df["attack_type"].map(label_map)
+
+            # Identify columns to normalize: numeric columns which are NOT CONSTANT
+            columns_to_normalize = [numeric_column
+                                    for numeric_column in list(X_train.select_dtypes(include=['float', 'int']).columns)
+                                    if X_train[numeric_column].nunique() > 1]
+
+            # Retrieve mean and std needed for normalizing
+            mean = X_train[columns_to_normalize].mean()
+            std = X_train[columns_to_normalize].std()
+
+            # --- Z-SCORE NORMALIZATION PER-TASK ---
+            X_train[columns_to_normalize] = (X_train[columns_to_normalize] - mean) / std
+            X_val[columns_to_normalize] = (X_val[columns_to_normalize] - mean) / std
+            X_test[columns_to_normalize] = (X_test[columns_to_normalize] - mean) / std
+
+            # Train new GMM for current attack
+            gmm = GaussianMixture(n_components=self.n_components,
+                                   covariance_type=self.covariance_type,
+                                   reg_covar=self.reg_covar,
+                                   random_state=42)
+            gmm.fit(X_train)
+            gmms[class_idx] = gmm
+
+            # AIC on validation
+            aic = gmm.aic(X_val)
+            logger.info(f'Task {i + 1} | Attack: {current_attack} | AIC (val): {aic:.2f}')
+
+            # Inference using all seen GMMs on cumulative test
+            log_likelihoods = np.zeros((X_test.shape[0], len(gmms)))
+            for gmm_class_idx, gmm_model in gmms.items():
+                log_likelihoods[:, gmm_class_idx] = gmm_model.score_samples(X_test)
+            y_pred = np.argmax(log_likelihoods, axis=1)
+
+            # Evaluation
+            accuracy = accuracy_score(y_test, y_pred)
+            precision = precision_score(y_test, y_pred, average="macro", zero_division=0)
+            recall = recall_score(y_test, y_pred, average="macro", zero_division=0)
+            f1_macro = f1_score(y_test, y_pred, average="macro", zero_division=0)
+            f1_weighted = f1_score(y_test, y_pred, average="weighted", zero_division=0)
+
+            logger.info(f'Task {i + 1} -> Accuracy: {accuracy:.4f} | F1 (Macro): {f1_macro:.4f} | F1 (Weighted): {f1_weighted:.4f}')
+            
+            metrics.append({
+                "dataset": self.dataset_name,
+                "n_components": self.n_components,
+                "covariance_type": self.covariance_type,
+                "reg_covar": self.reg_covar,
+                "task": i + 1,
+                "attack": current_attack,
+                "accuracy": accuracy,
+                "precision": precision,
+                "recall": recall,
+                "f1_macro": f1_macro,
+                "f1_weighted": f1_weighted,
+                "aic_val": aic
+            })
+
+        # --- SAVE MODEL AND METRICS ---
+        model_folder = get_full_model_rel_path(self.dataset_name, '')
+        model_file = os.path.join(model_folder, 'Continual_Learning_SupervisedGMM.pkl')
+        continual_metrics_csv = get_full_model_rel_path(self.dataset_name, cfg['continual_metrics_rel_filename'])
+
+        # Create the folders if they don't exist
+        os.makedirs(os.path.dirname(continual_metrics_csv), exist_ok=True)
+
+        # Save model as pickle
+        with open(model_file, 'wb') as f:
+            pickle.dump(gmms, f)
+
+        # Save metrics to CSV
+        metrics_df = pd.DataFrame(metrics)
+        logger.info('Metrics:')
+        logger.info('')
+        logger.info(metrics_df)
+
+        with open(continual_metrics_csv, 'a') as f:
+            metrics_df.to_csv(f, mode='a', header=f.tell() == 0, index=False, lineterminator='\n')
+
+        logger.info(f'Saved the metrics to {continual_metrics_csv}')
         logger.info(f'Finished task {self.__class__.__name__}')

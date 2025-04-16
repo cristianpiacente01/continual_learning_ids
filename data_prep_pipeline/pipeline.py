@@ -426,7 +426,7 @@ class CreateTasks(luigi.Task):
         logger.info(f'Loaded train set from {self.input().path}/train.csv')
 
         # Columns list to normalize later
-        columns_to_normalize = list(train_df.select_dtypes(include=['float', 'int']).columns)
+        #columns_to_normalize = list(train_df.select_dtypes(include=['float', 'int']).columns)
 
         # Separate benign and attack samples
         benign_df = train_df[train_df['attack'] == False]
@@ -477,11 +477,11 @@ class CreateTasks(luigi.Task):
             task_df = pd.concat([task_benign_df, task_attack_df], ignore_index=True)
 
             # Compute per-task normalization
-            task_mean = task_df[columns_to_normalize].mean()
-            task_std = task_df[columns_to_normalize].std()
+            #task_mean = task_df[columns_to_normalize].mean()
+            #task_std = task_df[columns_to_normalize].std()
 
             # Normalize the task
-            task_df[columns_to_normalize] = (task_df[columns_to_normalize] - task_mean) / task_std
+            #task_df[columns_to_normalize] = (task_df[columns_to_normalize] - task_mean) / task_std
 
             # Save to .csv
             task_path = os.path.join(self.output().path, f'task_{idx + 1}.csv')
