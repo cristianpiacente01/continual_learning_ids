@@ -164,4 +164,13 @@ Use the parameter `--target` as "multi" for multi-classification, else "binary".
 
     python3 -m luigi --module pipeline FullDatasetSupervisedGMM --dataset-name "CIC-IDS2017" --attack-only false --train-percentage 100 --max-components 3 --covariance-type "full" --reg-covar 1e-6 --tune-n-components false --selection-metric "AIC" --local-scheduler
 
-###### TODO Continual Learning experiments + OoD
+###### Continual Learning Supervised GMM
+
+`--covariance-type` is a string describing the type of covariance parameters to use, which must be "full" or "tied" or "diag" or "spherical" (by default "full").
+
+`--reg-covar` is the non-negative regularization added to the diagonal of covariance (by default 1e-6).
+
+`--n-components` is the number of components globally in GMMs (by default 3).
+
+    python -m luigi --module pipeline ContinualSupervisedGMM --dataset-name "CIC-IDS2017" --covariance-type "full" --reg-covar 1e-6 --n-components 3 --local-scheduler
+
