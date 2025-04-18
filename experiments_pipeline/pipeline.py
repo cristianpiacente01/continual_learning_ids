@@ -518,10 +518,13 @@ class ContinualSupervisedGMM(luigi.Task):
         gmms = {}
         metrics = []
 
+        first_task_mean = None
+        first_task_std = None
+
         for i, task_file in enumerate(task_files):
             task_df = pd.read_csv(task_file)
 
-            current_attacks = set(task_df["attack_type"].unique()) - {"benign", "normal"}
+            current_attacks = set(task_df["attack_type"].unique()) - {"benign", "Benign", "normal", "Normal"} 
             assert len(current_attacks) == 1, f"Task file {task_file} must contain exactly 1 attack type"
             current_attack = current_attacks.pop()
 
@@ -548,19 +551,28 @@ class ContinualSupervisedGMM(luigi.Task):
             X_test = test_seen_df.drop(columns=["attack", "attack_type"])
             y_test = test_seen_df["attack_type"].map(label_map)
 
-            # Identify columns to normalize: numeric columns which are NOT CONSTANT
+            # Identify columns to normalize: numeric columns, keep also constant ones since they may change among different tasks!
             columns_to_normalize = [numeric_column
-                                    for numeric_column in list(X_train.select_dtypes(include=['float', 'int']).columns)
-                                    if X_train[numeric_column].nunique() > 1]
+                                    for numeric_column in list(X_train.select_dtypes(include=['float', 'int']).columns)]
 
-            # Retrieve mean and std needed for normalizing
-            mean = X_train[columns_to_normalize].mean()
-            std = X_train[columns_to_normalize].std()
-
-            # --- Z-SCORE NORMALIZATION PER-TASK ---
-            X_train[columns_to_normalize] = (X_train[columns_to_normalize] - mean) / std
-            X_val[columns_to_normalize] = (X_val[columns_to_normalize] - mean) / std
-            X_test[columns_to_normalize] = (X_test[columns_to_normalize] - mean) / std
+            # Retrieve mean and std if it's the first task
+            if first_task_mean is None:
+                first_task_mean = X_train[columns_to_normalize].mean()
+                first_task_std = X_train[columns_to_normalize].std()
+            
+            # --- Z-SCORE NORMALIZATION USING MEAN & STD FROM 1st TASK ---
+            for col in columns_to_normalize:
+                mean = first_task_mean[col]
+                std = first_task_std[col]
+                # Avoid NaN or something that isn't ok for training a GMM
+                if pd.isna(mean) or mean < 1e-8 or pd.isna(std) or std < 1e-8:
+                    X_train[col] = 0.0
+                    X_val[col] = 0.0
+                    X_test[col] = 0.0
+                else:
+                    X_train[col] = (X_train[col] - mean) / std
+                    X_val[col] = (X_val[col] - mean) / std
+                    X_test[col] = (X_test[col] - mean) / std
 
             # Train new GMM for current attack
             gmm = GaussianMixture(n_components=self.n_components,
@@ -619,8 +631,7 @@ class ContinualSupervisedGMM(luigi.Task):
         # Save metrics to CSV
         metrics_df = pd.DataFrame(metrics)
         logger.info('Metrics:')
-        logger.info('')
-        logger.info(metrics_df)
+        logger.info(f'\n{metrics_df}')
 
         with open(continual_metrics_csv, 'a') as f:
             metrics_df.to_csv(f, mode='a', header=f.tell() == 0, index=False, lineterminator='\n')
