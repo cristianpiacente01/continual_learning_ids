@@ -172,5 +172,5 @@ Use the parameter `--target` as "multi" for multi-classification, else "binary".
 
 `--n-components` is the number of components globally in GMMs (by default 3).
 
-    python -m luigi --module pipeline ContinualSupervisedGMM --dataset-name "CIC-IDS2017" --covariance-type "full" --reg-covar 1e-6 --n-components 3 --local-scheduler
+    python3 -m luigi --module pipeline ContinualSupervisedGMM --dataset-name "CIC-IDS2017" --covariance-type "full" --reg-covar 1e-6 --n-components 3 --local-scheduler
 
