@@ -58,13 +58,12 @@ To quit the virtual environment, it's sufficient to execute the command
 **Steps**:
 
 0. Merge all data (train-val-test) into one file if not already done
-1. Preprocessing, but no normalization yet (see "Preprocessing steps")
+1. Preprocessing, but no normalization
 2. Split into two distributions: 
     2a. Top classes (including benign) where number of samples >= threshold parameter (e.g. 3000), i.e. **Closed-Set** multi-classification (known classes)
     2b. The rest where we set the labels to "unknown", i.e. **Out-of-Distribution** binary classification (0-day attacks) 
 3. Split 2a. (Closed-Set) into training (60%), validation (20%) and test set (20%)
 4. Create tasks (batches) using the training set, each one with benign flows and 1 attack type flows, where sampling could be applied depending on the input parameter: if **"natural"**, no balancing is performed and for each task we use all the available attack samples w.r.t that class; if **"balanced_attacks"** every task will have the same number of attack samples using the minority class; if **"fully_balanced"** benign flows are balanced per task too, using the same number
-5. Normalization per-task
 
 ###### Preprocessing steps
 
@@ -89,10 +88,10 @@ To quit the virtual environment, it's sufficient to execute the command
 
 6. 
     a. Baseline modeling and evaluation on the full Closed-Set (i.e., use the split dataset from 3.) \
-    b. (TODO) Modeling on each task from train (simulate a real-time data stream), without catastrophic forgetting: \
+    b. Modeling on each task from train (simulate a real-time data stream), without catastrophic forgetting: \
         - Incrementally train (without storing the previous data) \
         - Evaluate on the validation set and predict on the test set (Continual Learning while checking the ability of retaining past knowledge)
-7. Use the OoD data for testing generalization capabilities
+7. (TODO) Use the OoD data for testing generalization capabilities
 
 
 #### Execution
