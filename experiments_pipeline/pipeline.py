@@ -10,6 +10,10 @@ from sklearn.model_selection import ParameterSampler
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 import pickle
 from sklearn.model_selection import train_test_split
+import torch
+from torch import nn
+from torch.utils.data import TensorDataset, DataLoader
+from laplace import Laplace
 
 
 # Set up logger
@@ -32,6 +36,7 @@ cfg = {
 
     'models_folder': config.get('ExperimentsPipeline', 'models_folder'),
     'metrics_rel_filename': config.get('ExperimentsPipeline', 'metrics_rel_filename'),
+    'bnn_metrics_rel_filename': config.get('ExperimentsPipeline', 'bnn_metrics_rel_filename'),
     'continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'continual_metrics_rel_filename'),
 }
 
@@ -44,6 +49,21 @@ def get_full_dataset_rel_path(dataset_name, suffix):
 # suffix is the substring of the path after the model folder
 def get_full_model_rel_path(dataset_name, suffix):
     return f'{cfg["models_folder"]}/{dataset_name}/{suffix}'
+
+# Define fixed MLP architecture for BNN model
+class MLP(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, 2)  # Older versions of torch don't support BCE loss, we use CrossEntropyLoss with softmax
+        )
+
+    def forward(self, x):
+        return self.net(x).squeeze(1)
 
 
 class DirectoryTarget(luigi.Target):
@@ -637,4 +657,204 @@ class ContinualSupervisedGMM(luigi.Task):
             metrics_df.to_csv(f, mode='a', header=f.tell() == 0, index=False, lineterminator='\n')
 
         logger.info(f'Saved the metrics to {continual_metrics_csv}')
+        logger.info(f'Finished task {self.__class__.__name__}')
+
+
+
+class FullDatasetBNN(luigi.Task):
+    """
+    Full-dataset binary classification using a BNN implemented via Laplace approximation on a fixed MLP architecture
+    """
+
+    dataset_name = luigi.Parameter()
+
+    # Batch size
+    batch_size = luigi.IntParameter(default=128)
+
+    # Learning rate 
+    learning_rate = luigi.FloatParameter(default=0.001)
+
+    def requires(self):
+        # Train, validation and test are needed 
+        class FakeTask(luigi.Task):
+            def output(_):
+                return DirectoryTarget(get_full_dataset_rel_path(self.dataset_name,
+                                                                 cfg['split_closed_set_rel_folder']))
+
+        return FakeTask()
+
+
+    def run(self):
+        logger.info(f'Started task {self.__class__.__name__}')
+
+        logger.info('====== PARAMETERS ======')
+        logger.info(f'batch_size={self.batch_size}')
+        logger.info(f'learning_rate={self.learning_rate}')
+        logger.info('========================')
+
+         # Load the train dataset
+        train_df = pd.read_csv(os.path.join(self.input().path, 'train.csv'))
+
+        logger.info(f'Loaded train set from {self.input().path}/train.csv')
+
+        # Load the validation dataset
+        val_df = pd.read_csv(os.path.join(self.input().path, 'val.csv'))
+
+        logger.info(f'Loaded validation set from {self.input().path}/val.csv')
+
+        # Load the test dataset
+        test_df = pd.read_csv(os.path.join(self.input().path, 'test.csv'))
+
+        logger.info(f'Loaded test set from {self.input().path}/test.csv')
+
+        # Extract features
+        X_train = train_df.drop(columns=["attack", "attack_type"])
+        X_val = val_df.drop(columns=["attack", "attack_type"])
+        X_test = test_df.drop(columns=["attack", "attack_type"])
+
+        # Extract labels
+        y_train = train_df["attack"].astype(int).values
+        y_val = val_df["attack"].astype(int).values
+        y_test = test_df["attack"].astype(int).values
+
+        # Identify columns to normalize
+        columns_to_normalize = list(X_train.select_dtypes(include=['float', 'int']).columns)
+
+        logger.info(f'Applying Z-score normalization on columns: {columns_to_normalize}')
+
+        # Z-Score normalization using train, for each chosen column individually
+        mean = X_train[columns_to_normalize].mean()
+        std = X_train[columns_to_normalize].std()
+
+        X_train[columns_to_normalize] = (X_train[columns_to_normalize] - mean) / std
+        X_val[columns_to_normalize] = (X_val[columns_to_normalize] - mean) / std
+        X_test[columns_to_normalize] = (X_test[columns_to_normalize] - mean) / std
+
+        X_train_t = torch.tensor(X_train.values.astype(np.float32))
+        X_val_t = torch.tensor(X_val.values.astype(np.float32))
+        X_test_t = torch.tensor(X_test.values.astype(np.float32))
+
+        y_train_t = torch.tensor(y_train, dtype=torch.long)
+        y_val_t = torch.tensor(y_val, dtype=torch.long)
+        y_test_t = torch.tensor(y_test, dtype=torch.long)
+
+        train_loader = DataLoader(TensorDataset(X_train_t, y_train_t), batch_size=self.batch_size, shuffle=True)
+        val_loader = DataLoader(TensorDataset(X_val_t, y_val_t), batch_size=self.batch_size, shuffle=True)
+
+        # Initialize model and optimizer
+        model = MLP(X_train_t.shape[1])
+        optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
+        loss_fn = nn.CrossEntropyLoss()
+
+        # Training loop
+        for epoch in range(10):
+            model.train()
+            running_loss = 0
+            correct_train = 0
+            total_train = 0
+
+            for xb, yb in train_loader:
+                optimizer.zero_grad()
+                out = model(xb)
+                loss = loss_fn(out, yb)
+                loss.backward()
+                optimizer.step()
+                running_loss += loss.item() * xb.size(0)
+
+                pred = out.argmax(dim=1)
+                correct_train += (pred == yb).sum().item()
+                total_train += yb.size(0)
+
+            avg_train_loss = running_loss / total_train
+            train_acc = correct_train / total_train
+
+            # Evaluate on validation
+            model.eval()
+            correct_val = 0
+            total_val = 0
+            val_loss = 0
+
+            with torch.no_grad():
+                for xb, yb in val_loader:
+                    out = model(xb)
+                    loss = loss_fn(out, yb)
+                    val_loss += loss.item() * xb.size(0)
+                    pred = out.argmax(dim=1)
+                    correct_val += (pred == yb).sum().item()
+                    total_val += yb.size(0)
+
+            avg_val_loss = val_loss / total_val
+            val_acc = correct_val / total_val
+
+            logger.info(f'Epoch {epoch+1} | Train Loss: {avg_train_loss:.4f} | Train Acc: {train_acc:.4f} | Val Loss: {avg_val_loss:.4f} | Val Acc: {val_acc:.4f}')
+
+        logger.info(f'Training completed')
+
+        # Apply Laplace approximation to the final layer (BNN via Laplace approximation)
+        la = Laplace(model, 'classification', subset_of_weights='last_layer')
+        la.fit(train_loader)
+
+        logger.info('Laplace approximation fitted on last layer')
+
+        # Laplace-adjusted accuracy on val
+        logits_val = la(X_val_t).detach()
+        probs_val = torch.softmax(logits_val, dim=1).numpy()
+        y_pred_val = np.argmax(probs_val, axis=1)
+        val_acc_post_laplace = accuracy_score(y_val, y_pred_val)
+
+        logger.info(f'Post-Laplace validation accuracy: {val_acc_post_laplace:.4f}')
+
+        # Inference
+        model.eval()
+        logits = la(X_test_t).detach()
+        probs = torch.softmax(logits, dim=1).numpy()
+        y_pred = np.argmax(probs, axis=1)
+
+        # Compute evaluation metrics
+        accuracy = accuracy_score(y_test, y_pred)
+        precision = precision_score(y_test, y_pred, average="macro")
+        recall = recall_score(y_test, y_pred, average="macro")
+        f1 = f1_score(y_test, y_pred, average="macro")
+        f1_weighted = f1_score(y_test, y_pred, average="weighted")
+        auc_roc = roc_auc_score(y_test, probs[:, 1])
+
+        logger.info(f'Evaluation metrics:')
+        logger.info(f'-> Accuracy: {accuracy}')
+        logger.info(f'-> Precision: {precision}')
+        logger.info(f'-> Recall: {recall}')
+        logger.info(f'-> F1-Score (Macro): {f1}')
+        logger.info(f'-> F1-Score (Weighted): {f1_weighted}')
+        logger.info(f'-> AUROC: {auc_roc}')
+        
+        # Save model and metrics
+        model_name = "Full-Dataset_BNN_Binary_Laplace"
+        model_folder = get_full_model_rel_path(self.dataset_name, '')
+        model_file = os.path.join(model_folder, f'{model_name}_weights.pt')
+        metrics_csv = get_full_model_rel_path(self.dataset_name, cfg['bnn_metrics_rel_filename'])
+
+        # Create the folders if they don't exist
+        os.makedirs(os.path.dirname(metrics_csv), exist_ok=True)
+
+        # Save model weights
+        torch.save(model.state_dict(), model_file)
+
+        # Save evaluation metrics to CSV
+        metrics_df = pd.DataFrame([{
+            "model_name": model_name,
+            "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
+            "f1_score": f1,
+            "f1_score_weighted": f1_weighted,
+            "roc_auc": auc_roc,
+            "best_hyperparameters": str({
+                "batch_size": self.batch_size,
+                "learning_rate": self.learning_rate
+            })
+        }])
+
+        with open(metrics_csv, 'a') as f:
+            metrics_df.to_csv(f, mode='a', header=f.tell() == 0, index=False, lineterminator='\n')
+
+        logger.info(f'Saved the metrics to {metrics_csv}')
         logger.info(f'Finished task {self.__class__.__name__}')
