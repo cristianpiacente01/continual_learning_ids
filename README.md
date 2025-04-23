@@ -175,8 +175,8 @@ Use the parameter `--target` as "multi" for multi-classification, else "binary".
 
 ###### Full-Dataset Bayesian Neural Network (MLP, Laplace approximation)
 
-`--batch-size` is an integer representing the batch size used in the data loader.
+`--batch-size` is an integer representing the batch size used in the data loader (by default 128).
 
-`--learning-rate` is the learning rate used in the optimizer.
+`--learning-rate` is the learning rate used in the optimizer (by default 0.001).
 
     python3 -m luigi --module pipeline FullDatasetBNN --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --local-scheduler
