@@ -173,3 +173,10 @@ Use the parameter `--target` as "multi" for multi-classification, else "binary".
 
     python3 -m luigi --module pipeline ContinualSupervisedGMM --dataset-name "CIC-IDS2017" --covariance-type "full" --reg-covar 1e-6 --n-components 3 --local-scheduler
 
+###### Full-Dataset Bayesian Neural Network (MLP, Laplace approximation)
+
+`--batch-size` is an integer representing the batch size used in the data loader.
+
+`--learning-rate` is the learning rate used in the optimizer.
+
+    python3 -m luigi --module pipeline FullDatasetBNN --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --local-scheduler
