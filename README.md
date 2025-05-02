@@ -126,6 +126,10 @@ The first command is common for every dataset: change the working directory to `
 
     python3 -m luigi --module pipeline CreateTasks --dataset-name "UNSW-NB15" --input-file-extension ".csv" --features-to-drop "[\"id\"]" --attack-types-to-drop "[]" --threshold 3000 --sampling-strategy "natural" --local-scheduler
 
+###### For TON-IoT
+
+    python3 -m luigi --module pipeline CreateTasks --dataset-name "TON-IoT" --input-file-extension ".csv" --features-to-drop "[\"ts\", \"src_ip\", \"src_port\", \"dst_ip\", \"dst_port\", \"dns_query\", \"uid\", \"ssl_subject\", \"ssl_issuer\", \"http_method\", \"http_uri\", \"http_version\", \"http_user_agent\", \"http_orig_mime_types\", \"weird_notice\"]" --attack-types-to-drop "[]" --threshold 3000 --sampling-strategy "natural" --local-scheduler
+
 
 ##### EXPERIMENTS PIPELINE
 
