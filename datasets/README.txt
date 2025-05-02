@@ -33,6 +33,9 @@ https://ieee-dataport.org/open-access/iot-network-intrusion-dataset but I didn't
 � (EDA WAS DONE, BUT NOT RECOMMENDED FOR USE) CIDDS-001
 https://www.kaggle.com/datasets/dhoogla/cidds001?select=cidds-001-openstack.parquet (not the full dataset, it would be huge), EDA was performed but the dataset is very very unbalanced!
 
+� TON-IoT
+https://unsw-my.sharepoint.com/personal/z5025758_ad_unsw_edu_au/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Fz5025758_ad_unsw_edu_au%2FDocuments%2FTON_IoT%20datasets%2FProcessed_datasets%2FProcessed_Network_dataset&ga=1 (from the paper Jacopo sent me; not the full dataset, sampling was performed keeping 100k rows for each csv and the original attacks distribution)
+
 ---
 
 List of papers with their associated datasets:

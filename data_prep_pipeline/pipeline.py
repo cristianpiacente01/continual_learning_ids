@@ -156,7 +156,7 @@ class Preprocessing(luigi.Task):
         ##### --- AUTOMATIC CREATION OF COLUMNS ATTACK_TYPE, ATTACK --- #####
 
         # Search the correct column for attack_type
-        columns_to_check = ['attack_cat', 'attack', 'Label', 'label']
+        columns_to_check = ['attack_cat', 'attack', 'Label', 'label', 'type']
         selected_column = None
         for col in reversed(columns_to_check):
             if col in df.columns and df[col].dtype in ['object', 'category']:
