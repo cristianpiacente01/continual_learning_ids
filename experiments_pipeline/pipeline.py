@@ -15,6 +15,8 @@ from torch import nn
 from torch.utils.data import TensorDataset, DataLoader
 from laplace import Laplace
 
+# Fix logging for Python 3.12.0
+logging.root.handlers.clear()
 
 # Set up logger
 logging.basicConfig(filename='luigi.log', level=logging.INFO, 
@@ -60,7 +62,7 @@ class MLP(nn.Module):
             nn.ReLU(),
             nn.Linear(64, 64),
             nn.ReLU(),
-            nn.Linear(64, 2)  # Older versions of torch don't support BCE loss, we use CrossEntropyLoss with softmax
+            nn.Linear(64, 2)  # Laplace doesn't support BCE loss, we use CrossEntropyLoss with softmax
         )
 
     def forward(self, x):

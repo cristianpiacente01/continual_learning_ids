@@ -6,6 +6,8 @@ import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
 
+# Fix logging for Python 3.12.0
+logging.root.handlers.clear()
 
 # Set up logger
 logging.basicConfig(filename='luigi.log', level=logging.INFO, 
