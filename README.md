@@ -1,5 +1,7 @@
 # Master's thesis about CL for IDS
 
+Tested on **Python 3.12.0**.
+
 Repository containing pipelines for preparing data and experimenting for my Master's thesis about Continual Learning in the Intrusion Detection Systems domain.
 
 Cristian Piacente 866020 @ University of Milan - Bicocca
@@ -184,3 +186,11 @@ Use the parameter `--target` as "multi" for multi-classification, else "binary".
 `--learning-rate` is the learning rate used in the optimizer (by default 0.001).
 
     python3 -m luigi --module pipeline FullDatasetBNN --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --local-scheduler
+
+###### Continual Learning Bayesian Neural Network (MLP, Laplace approximation)
+
+`--batch-size` is an integer representing the batch size used in the data loader (by default 128).
+
+`--learning-rate` is the learning rate used in the optimizer (by default 0.001).
+
+    python3 -m luigi --module pipeline ContinualBNN --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --local-scheduler
