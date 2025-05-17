@@ -541,6 +541,7 @@ class ContinualSupervisedGMM(luigi.Task):
         gmms = {}
         metrics = []
 
+        class_sample_counts = {}  # dict for prior computation
         first_task_mean = None
         first_task_std = None
 
@@ -609,10 +610,20 @@ class ContinualSupervisedGMM(luigi.Task):
             aic = gmm.aic(X_val)
             logger.info(f'Task {i + 1} | Attack: {current_attack} | AIC (val): {aic:.2f}')
 
-            # Inference using all seen GMMs on cumulative test
+            # Update class sample count (manual check)
+            if class_idx not in class_sample_counts:
+                class_sample_counts[class_idx] = 0
+            class_sample_counts[class_idx] += len(X_train)
+            total_samples_seen = sum(class_sample_counts.values())
+
+            # Compute log-likelihood + log-prior for each class
             log_likelihoods = np.zeros((X_test.shape[0], len(gmms)))
             for gmm_class_idx, gmm_model in gmms.items():
-                log_likelihoods[:, gmm_class_idx] = gmm_model.score_samples(X_test)
+                log_likelihood = gmm_model.score_samples(X_test)
+                prior_prob = class_sample_counts[gmm_class_idx] / total_samples_seen
+                log_prior = np.log(prior_prob)
+                log_likelihoods[:, gmm_class_idx] = log_likelihood + log_prior
+
             y_pred = np.argmax(log_likelihoods, axis=1)
 
             # Evaluation
