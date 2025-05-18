@@ -14,6 +14,7 @@ import torch
 from torch import nn
 from torch.utils.data import TensorDataset, DataLoader
 from laplace import Laplace
+from sklearn.mixture import BayesianGaussianMixture
 
 # Fix logging for Python 3.12.0
 logging.root.handlers.clear()
@@ -41,6 +42,7 @@ cfg = {
     'bnn_metrics_rel_filename': config.get('ExperimentsPipeline', 'bnn_metrics_rel_filename'),
     'continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'continual_metrics_rel_filename'),
     'bnn_continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'bnn_continual_metrics_rel_filename'),
+    'bayesian_continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'bayesian_continual_metrics_rel_filename'),
 }
 
 # Retrieve a relative path w.r.t the dataset name in the datasets folder
@@ -1082,6 +1084,208 @@ class ContinualBNN(luigi.Task):
 
         # Save model weights
         torch.save(model.state_dict(), model_file)
+
+        # Save metrics to CSV
+        metrics_df = pd.DataFrame(metrics)
+        logger.info('Metrics:')
+        logger.info(f'\n{metrics_df}')
+
+        with open(continual_metrics_csv, 'a') as f:
+            metrics_df.to_csv(f, mode='a', header=f.tell() == 0, index=False, lineterminator='\n')
+
+        logger.info(f'Saved the metrics to {continual_metrics_csv}')
+        logger.info(f'Finished task {self.__class__.__name__}')
+
+
+
+class ContinualBayesianGMM(luigi.Task):
+    """
+    Continual Bayesian GMM for Continual Learning multi-class classification
+    """
+
+    dataset_name = luigi.Parameter()
+
+    # Type of covariance matrix
+    covariance_type = luigi.Parameter(default="full")
+
+    # Regularization for covariance matrix
+    reg_covar = luigi.FloatParameter(default=1e-6)
+
+    # Number of components used to represent each attack type (BayesianGaussianMixture can infer not to use all)
+    n_components = luigi.IntParameter(default=3)
+
+    # Type of the weight concentration prior
+    weight_concentration_prior_type = luigi.Parameter(default="dirichlet_process")  # or "dirichlet_distribution"
+
+    # Dirichlet concentration of each component on the weight distribution (Dirichlet), i.e. gamma in the literature
+    weight_concentration_prior = luigi.FloatParameter(default=0.01)
+
+    # Number of EM iterations to perform
+    max_iter = luigi.IntParameter(default=100)
+
+
+    def requires(self):
+        # The "split-dataset" (val.csv and test.csv) and "tasks" folders are needed
+        class FakeTask(luigi.Task):
+            def output(_):
+                return {'split-dataset': DirectoryTarget(get_full_dataset_rel_path(self.dataset_name, 
+                                                                 cfg['split_closed_set_rel_folder'])),
+                        'tasks': DirectoryTarget(get_full_dataset_rel_path(self.dataset_name, 
+                                                                           cfg['tasks_rel_folder']))}
+            
+        return FakeTask()
+
+
+    def run(self):
+        logger.info(f'Started task {self.__class__.__name__}')
+
+        logger.info(f'====== PARAMETERS (DATASET {self.dataset_name}) ======')
+        logger.info(f'covariance_type={self.covariance_type}')
+        logger.info(f'reg_covar={self.reg_covar}')
+        logger.info(f'n_components={self.n_components}')
+        logger.info(f'weight_concentration_prior_type={self.weight_concentration_prior_type}')
+        logger.info(f'weight_concentration_prior={self.weight_concentration_prior}')
+        logger.info(f'max_iter={self.max_iter}')
+        logger.info('========================')
+
+        split_path = self.input()['split-dataset'].path
+        tasks_path = self.input()['tasks'].path
+        
+        # Retrieve val.csv and test.csv from the split-dataset folder, then the csv files from the tasks folder
+        val_df = pd.read_csv(os.path.join(split_path, "val.csv"))
+        test_df = pd.read_csv(os.path.join(split_path, "test.csv"))
+        task_files = sorted(glob.glob(os.path.join(tasks_path, "task_*.csv")))
+
+        label_map = {}
+        next_class_index = 0
+        gmms = {}
+        metrics = []
+
+        class_sample_counts = {}  # dict for prior computation
+        first_task_mean = None
+        first_task_std = None
+
+        for i, task_file in enumerate(task_files):
+            task_df = pd.read_csv(task_file)
+
+            current_attacks = set(task_df["attack_type"].unique()) - {"benign", "Benign", "normal", "Normal"} 
+            assert len(current_attacks) == 1, f"Task file {task_file} must contain exactly 1 attack type"
+            current_attack = current_attacks.pop()
+
+            # Assign index if first time seeing this attack type
+            if current_attack not in label_map:
+                label_map[current_attack] = next_class_index
+                next_class_index += 1
+
+            class_idx = label_map[current_attack]
+            
+            # --- TRAINING SET FROM THE TASK CONSIDERING JUST THE CURRENT ATTACK, NO BENIGN TRAFFIC ---
+            task_df = task_df[task_df["attack_type"] == current_attack]
+            X_train = task_df.drop(columns=["attack", "attack_type"])
+            #y_train = np.full(len(X_train), class_idx)
+
+            # --- VALIDATION SET WITH JUST THE CURRENT ATTACK ---
+            val_task_df = val_df[val_df["attack_type"] == current_attack]
+            X_val = val_task_df.drop(columns=["attack", "attack_type"])
+            #y_val = np.full(len(X_val), class_idx)
+
+            # --- CUMULATIVE TEST SET WITH THE SEEN ATTACKS UP TO NOW ---
+            seen_attack_types = set(label_map.keys())
+            test_seen_df = test_df[test_df["attack_type"].isin(seen_attack_types)]
+            X_test = test_seen_df.drop(columns=["attack", "attack_type"])
+            y_test = test_seen_df["attack_type"].map(label_map)
+
+            # Identify columns to normalize: numeric columns, keep also constant ones since they may change among different tasks!
+            columns_to_normalize = [numeric_column
+                                    for numeric_column in list(X_train.select_dtypes(include=['float', 'int']).columns)]
+
+            # Retrieve mean and std if it's the first task
+            if first_task_mean is None:
+                first_task_mean = X_train[columns_to_normalize].mean()
+                first_task_std = X_train[columns_to_normalize].std()
+            
+            # --- Z-SCORE NORMALIZATION USING MEAN & STD FROM 1st TASK ---
+            for col in columns_to_normalize:
+                mean = first_task_mean[col]
+                std = first_task_std[col]
+                # Avoid NaN or something that isn't ok for training a GMM
+                if pd.isna(mean) or mean < 1e-8 or pd.isna(std) or std < 1e-8:
+                    X_train[col] = 0.0
+                    X_val[col] = 0.0
+                    X_test[col] = 0.0
+                else:
+                    X_train[col] = (X_train[col] - mean) / std
+                    X_val[col] = (X_val[col] - mean) / std
+                    X_test[col] = (X_test[col] - mean) / std
+
+            # Train new GMM for current attack
+            gmm = BayesianGaussianMixture(n_components=self.n_components,
+                                          covariance_type=self.covariance_type,
+                                          reg_covar=self.reg_covar,
+                                          weight_concentration_prior_type=self.weight_concentration_prior_type,
+                                          weight_concentration_prior=self.weight_concentration_prior,
+                                          max_iter=self.max_iter,
+                                          random_state=42)
+            gmm.fit(X_train)
+            gmms[class_idx] = gmm
+
+            # ELBO
+            elbo = gmm.lower_bound_
+
+            # Update class sample count (manual check)
+            if class_idx not in class_sample_counts:
+                class_sample_counts[class_idx] = 0
+            class_sample_counts[class_idx] += len(X_train)
+            total_samples_seen = sum(class_sample_counts.values())
+
+            # Compute log-likelihood + log-prior for each class
+            log_likelihoods = np.zeros((X_test.shape[0], len(gmms)))
+            for gmm_class_idx, gmm_model in gmms.items():
+                log_likelihood = gmm_model.score_samples(X_test)
+                prior_prob = class_sample_counts[gmm_class_idx] / total_samples_seen
+                log_prior = np.log(prior_prob)
+                log_likelihoods[:, gmm_class_idx] = log_likelihood + log_prior
+
+            y_pred = np.argmax(log_likelihoods, axis=1)
+
+            # Evaluation
+            accuracy = accuracy_score(y_test, y_pred)
+            precision = precision_score(y_test, y_pred, average="macro", zero_division=0)
+            recall = recall_score(y_test, y_pred, average="macro", zero_division=0)
+            f1_macro = f1_score(y_test, y_pred, average="macro", zero_division=0)
+            f1_weighted = f1_score(y_test, y_pred, average="weighted", zero_division=0)
+
+            logger.info(f'Task {i + 1} -> Accuracy: {accuracy:.4f} | F1 (Macro): {f1_macro:.4f} | F1 (Weighted): {f1_weighted:.4f}')
+            
+            metrics.append({
+                "dataset": self.dataset_name,
+                "n_components": self.n_components,
+                "covariance_type": self.covariance_type,
+                "reg_covar": self.reg_covar,
+                "weight_concentration_prior_type": self.weight_concentration_prior_type,
+                "weight_concentration_prior": self.weight_concentration_prior,
+                "max_iter": self.max_iter,
+                "task": i + 1,
+                "attack": current_attack,
+                "accuracy": accuracy,
+                "precision": precision,
+                "recall": recall,
+                "f1_macro": f1_macro,
+                "f1_weighted": f1_weighted,
+                "elbo": elbo
+            })
+
+        # --- SAVE MODEL AND METRICS ---
+        model_folder = get_full_model_rel_path(self.dataset_name, '')
+        model_file = os.path.join(model_folder, 'Continual_Learning_BayesianGMM.pkl')
+        continual_metrics_csv = get_full_model_rel_path(self.dataset_name, cfg['bayesian_continual_metrics_rel_filename'])
+
+        # Create the folders if they don't exist
+        os.makedirs(os.path.dirname(continual_metrics_csv), exist_ok=True)
+
+        # Save model as pickle
+        with open(model_file, 'wb') as f:
+            pickle.dump(gmms, f)
 
         # Save metrics to CSV
         metrics_df = pd.DataFrame(metrics)
