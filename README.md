@@ -179,6 +179,22 @@ Use the parameter `--target` as "multi" for multi-classification, else "binary".
 
     python3 -m luigi --module pipeline ContinualSupervisedGMM --dataset-name "CIC-IDS2017" --covariance-type "full" --reg-covar 1e-6 --n-components 3 --local-scheduler
 
+###### Continual Learning Bayesian GMM
+
+`--covariance-type` is a string describing the type of covariance parameters to use, which must be "full" or "tied" or "diag" or "spherical" (by default "full").
+
+`--reg-covar` is the non-negative regularization added to the diagonal of covariance (by default 1e-6).
+
+`--n-components` is the number of components globally in GMMs (by default 3).
+
+`--weight-concentration-prior-type` is the type of the weight concentration prior, which must be "dirichlet_process" or "dirichlet_distribution" (by default "dirichlet_process").
+
+`--weight-concentration-prior` is the Dirichlet concentration of each component on the weight distribution (by default 0.01).
+
+`--max-iter` is the number of EM iterations to perform (by default 100).
+
+    python3 -m luigi --module pipeline ContinualBayesianGMM --dataset-name "CIC-IDS2017" --covariance-type "full" --reg-covar 1e-6 --n-components 3 --weight-concentration-prior-type "dirichlet_process" --weight-concentration-prior 0.01 --max-iter 100 --local-scheduler
+
 ###### Full-Dataset Bayesian Neural Network (MLP, Laplace approximation)
 
 `--batch-size` is an integer representing the batch size used in the data loader (by default 128).
