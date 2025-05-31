@@ -15,6 +15,7 @@ from torch import nn
 from torch.utils.data import TensorDataset, DataLoader
 from laplace import Laplace
 from sklearn.mixture import BayesianGaussianMixture
+from sklearn.decomposition import TruncatedSVD
 
 # Fix logging for Python 3.12.0
 logging.root.handlers.clear()
@@ -1296,4 +1297,232 @@ class ContinualBayesianGMM(luigi.Task):
             metrics_df.to_csv(f, mode='a', header=f.tell() == 0, index=False, lineterminator='\n')
 
         logger.info(f'Saved the metrics to {continual_metrics_csv}')
+        logger.info(f'Finished task {self.__class__.__name__}')
+
+
+
+class FullDatasetSVDGMM(luigi.Task):
+    """
+    SVD applied on data + Supervised Gaussian Mixture Model (GMM) for multi-class classification
+    """
+
+    dataset_name = luigi.Parameter()
+
+    # Filter only attack data
+    attack_only = luigi.BoolParameter(default=True, parsing=luigi.BoolParameter.EXPLICIT_PARSING) 
+
+    # Percentage of training data to use
+    train_percentage = luigi.IntParameter(default=100) 
+
+    # Max number of components that can be used globally to represent attack types
+    # If tune_n_components is false, the number is fixed, else it's the upper bound (tuning starting from 1)
+    max_components = luigi.IntParameter(default=5)
+
+    # Type of covariance matrix
+    covariance_type = luigi.Parameter(default="full")
+
+    # Regularization for covariance matrix
+    reg_covar = luigi.FloatParameter(default=1e-2)
+
+    # Decide whether to tune the number of components globally in GMMs or not, by default yes
+    tune_n_components = luigi.BoolParameter(default=True, parsing=luigi.BoolParameter.EXPLICIT_PARSING)
+
+    # Metric (AIC, f1_score or accuracy) used for tuning on validation set if tune_n_components is true
+    # If not tuning, it's calculated once since the number of components is fixed
+    selection_metric = luigi.Parameter(default="AIC")
+
+    # Number of components used in SVD
+    n_components_SVD = luigi.IntParameter(default=30)
+
+    def requires(self):
+        # Train, validation and test are needed 
+        class FakeTask(luigi.Task):
+            def output(_):
+                return DirectoryTarget(get_full_dataset_rel_path(self.dataset_name,
+                                                                 cfg['split_closed_set_rel_folder']))
+
+        return FakeTask()
+
+
+    def run(self):
+        logger.info(f'Started task {self.__class__.__name__}')
+
+        logger.info('====== PARAMETERS FOR SVD Full-Dataset GMM ======')
+        logger.info(f'attack_only={self.attack_only}')
+        logger.info(f'train_percentage={self.train_percentage}')
+        logger.info(f'max_components={self.max_components}')
+        logger.info(f'covariance_type={self.covariance_type}')
+        logger.info(f'reg_covar={self.reg_covar}')
+        logger.info(f'tune_n_components={self.tune_n_components}')
+        logger.info(f'selection_metric={self.selection_metric}')
+        logger.info(f'n_components_SVD={self.n_components_SVD}')
+        logger.info('========================')
+
+        # Load the train dataset
+        train_df = pd.read_csv(os.path.join(self.input().path, 'train.csv'))
+
+        logger.info(f'Loaded train set from {self.input().path}/train.csv')
+
+        # Load the validation dataset
+        val_df = pd.read_csv(os.path.join(self.input().path, 'val.csv'))
+
+        logger.info(f'Loaded validation set from {self.input().path}/val.csv')
+
+        # Load the test dataset
+        test_df = pd.read_csv(os.path.join(self.input().path, 'test.csv'))
+
+        logger.info(f'Loaded test set from {self.input().path}/test.csv')
+
+        if self.attack_only:
+            train_df = train_df[train_df['attack'] == True]
+            val_df = val_df[val_df['attack'] == True]
+            test_df = test_df[test_df['attack'] == True]
+            logger.info(f'Filtered only attack data: train={len(train_df)}, val={len(val_df)}, test={len(test_df)}')
+
+        # Apply percentage-based sampling on training set
+        if self.train_percentage > 0 and self.train_percentage < 100:
+            train_df, _ = train_test_split(train_df, train_size=self.train_percentage / 100, stratify=train_df["attack"], random_state=42)
+            logger.info(f'Using only {self.train_percentage}% of training data: {len(train_df)} samples')
+        
+        # Extract features
+        X_train = train_df.drop(columns=["attack", "attack_type"])
+        X_val = val_df.drop(columns=["attack", "attack_type"])
+        X_test = test_df.drop(columns=["attack", "attack_type"])
+
+        # Apply SVD
+        svd = TruncatedSVD(n_components=self.n_components_SVD, random_state=42)
+        X_train = pd.DataFrame(svd.fit_transform(X_train)).reset_index(drop=True)
+        X_val = pd.DataFrame(svd.transform(X_val)).reset_index(drop=True)
+        X_test = pd.DataFrame(svd.transform(X_test)).reset_index(drop=True)
+
+        logger.info(f'Applied SVD with n_components = {self.n_components_SVD}')
+
+        logger.info(f'Transformed training set preview:')
+        logger.info(X_train.head())
+
+        # Extract labels
+        y_train = train_df["attack_type"]
+        y_val = val_df["attack_type"]
+        y_test = test_df["attack_type"]
+
+        # Encode attack types to numeric values
+        attack_types = sorted(y_train.unique())
+        attack_mapping = {attack: i for i, attack in enumerate(attack_types)}
+        y_train = y_train.map(attack_mapping).reset_index(drop=True)
+        y_val = y_val.map(attack_mapping).reset_index(drop=True)
+        y_test = y_test.map(attack_mapping).reset_index(drop=True)
+
+        logger.info(f'Mapped attack types to numerical labels: {attack_mapping}')
+
+        ##### --- GLOBAL TUNING LOOP --- #####
+        best_class_gmms = None       # Dictionary of class_idx -> best GMM
+        best_score = -np.inf         # Best validation score observed so far
+        best_n_components = None     # Number of components corresponding to best_score
+
+        # If tuning try number of components from 1 to max_components, else just one iteration (max_components itself)
+        for n_components in range(1, self.max_components + 1) if self.tune_n_components else [self.max_components]:
+            
+            logger.info(f'Trying n_components = {n_components}')
+
+            class_gmms = {}
+
+            # Train one GMM per class
+            for attack_type in attack_types:
+                class_idx = attack_mapping[attack_type]
+                X_train_class = X_train[y_train == class_idx]
+
+                gmm = GaussianMixture(n_components=n_components,
+                                      covariance_type=self.covariance_type,
+                                      reg_covar=self.reg_covar,
+                                      random_state=42)
+                gmm.fit(X_train_class)
+                class_gmms[class_idx] = gmm
+
+            # Use all GMMs to predict on validation set
+            log_likelihoods = np.zeros((X_val.shape[0], len(class_gmms)))
+            for class_idx, gmm in class_gmms.items():
+                log_likelihoods[:, class_idx] = gmm.score_samples(X_val)
+            y_val_pred = np.argmax(log_likelihoods, axis=1)
+
+            # Compute validation score based on selection metric
+            if self.selection_metric.lower() == "accuracy":
+                score = accuracy_score(y_val, y_val_pred)
+            elif self.selection_metric.lower() == "f1_score":
+                score = f1_score(y_val, y_val_pred, average="macro")
+            else: # == "aic":
+                # We want to minimize AIC not maximize, so we use a negative sign
+                score = -sum(class_gmms[class_idx].aic(X_val[y_val == class_idx])
+                            for _, class_idx in attack_mapping.items())
+
+            if self.selection_metric.lower() == "aic":
+                logger.info(f'n_components={n_components} -> Validation AIC = {-score} (minimization)')
+            else:
+                logger.info(f'n_components={n_components} -> Validation {self.selection_metric} = {score} (maximization)')
+
+            # Update best model if better than previous ones
+            if score > best_score:
+                best_score = score
+                best_class_gmms = class_gmms
+                best_n_components = n_components
+                logger.info(f'Best n_components so far: {n_components}')
+
+        ##### --- PREDICT ON TEST SET --- #####
+        log_likelihoods = np.zeros((X_test.shape[0], len(best_class_gmms)))
+        for class_idx, gmm in best_class_gmms.items():
+            log_likelihoods[:, class_idx] = gmm.score_samples(X_test)
+        y_test_pred = np.argmax(log_likelihoods, axis=1)
+
+        # Compute final test metrics
+        accuracy = accuracy_score(y_test, y_test_pred)
+        precision = precision_score(y_test, y_test_pred, average="macro")
+        recall = recall_score(y_test, y_test_pred, average="macro")
+        f1 = f1_score(y_test, y_test_pred, average="macro")
+        f1_weighted = f1_score(y_test, y_test_pred, average="weighted")
+
+        logger.info(f'Evaluation metrics:')
+        logger.info(f'-> Accuracy: {accuracy}')
+        logger.info(f'-> Precision: {precision}')
+        logger.info(f'-> Recall: {recall}')
+        logger.info(f'-> F1-Score (Macro): {f1}')
+        logger.info(f'-> F1-Score (Weighted): {f1_weighted}')
+        
+
+        ##### --- SAVE MODEL AND METRICS --- #####
+        model_name = f'Full-Dataset_SVD_SupervisedGMM{"_AttackOnly" if self.attack_only else ""}_{self.train_percentage}%' + \
+                    f'_{"Tune" if self.tune_n_components else "Fixed"}-{best_n_components}_{self.selection_metric}'
+
+        model_folder = get_full_model_rel_path(self.dataset_name, '')
+        model_file = os.path.join(model_folder, f'{model_name}.pkl')
+        metrics_csv = get_full_model_rel_path(self.dataset_name, cfg['metrics_rel_filename'])
+
+        # Create the folders if they don't exist
+        os.makedirs(os.path.dirname(metrics_csv), exist_ok=True)
+
+        # Save model as pickle
+        with open(model_file, 'wb') as f:
+            pickle.dump(best_class_gmms, f)
+
+        # Save evaluation metrics to CSV
+        metrics_df = pd.DataFrame([{
+            "model_name": model_name,
+            "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
+            "f1_score": f1,
+            "f1_score_weighted": f1_weighted,
+            "roc_auc": "N/A (Multi)",
+            "best_hyperparameters": str({
+                "covariance_type": self.covariance_type,
+                "reg_covar": self.reg_covar,
+                "selection_metric": self.selection_metric,
+                "tune_components": self.tune_n_components,
+                "n_components": best_n_components,
+                "n_components_SVD": self.n_components_SVD
+            }),
+        }])
+
+        with open(metrics_csv, 'a') as f:
+            metrics_df.to_csv(f, mode='a', header=f.tell() == 0, index=False, lineterminator='\n')
+
+        logger.info(f'Saved the metrics to {metrics_csv}')
         logger.info(f'Finished task {self.__class__.__name__}')
