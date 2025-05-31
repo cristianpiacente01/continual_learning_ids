@@ -210,3 +210,11 @@ Use the parameter `--target` as "multi" for multi-classification, else "binary".
 `--learning-rate` is the learning rate used in the optimizer (by default 0.001).
 
     python3 -m luigi --module pipeline ContinualBNN --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --local-scheduler
+
+###### Full-Dataset SVD Supervised Gaussian Mixture Models
+
+`--n-components-SVD` is the number of SVD (Singular Value Decomposition) components used for dimensionality reduction (by default 30)
+
+This Luigi task was created for experimenting with TON-IoT dataset in particular, so the default values refer to the best combination found for it.
+
+    python3 -m luigi --module pipeline FullDatasetSVDGMM --dataset-name "TON-IoT" --attack-only true --train-percentage 100 --max-components 5 --covariance-type "full" --reg-covar 1e-2 --tune-n-components true --selection-metric "AIC" --n-components-SVD 30 --local-scheduler
