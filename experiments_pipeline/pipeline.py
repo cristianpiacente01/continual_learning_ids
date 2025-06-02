@@ -61,15 +61,15 @@ class MLP(nn.Module):
     def __init__(self, input_dim):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(input_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 64),
-            nn.ReLU(),
-            nn.Linear(64, 2)  # Laplace doesn't support BCE loss, we use CrossEntropyLoss with softmax
+            nn.Linear(input_dim, 256),
+            nn.GELU(),
+            nn.Linear(256, 64),
+            nn.GELU(),
+            nn.Linear(64, 2) # Laplace doesn't support BCE loss, we use CrossEntropyLoss with softmax
         )
 
     def forward(self, x):
-        return self.net(x).squeeze(1)
+        return self.net(x)
 
 
 class DirectoryTarget(luigi.Target):
@@ -880,8 +880,9 @@ class FullDatasetBNN(luigi.Task):
 
 class ContinualBNN(luigi.Task):
     """
-    Continual Learning Binary Classification using BNN with Laplace approximation.
+    Continual Learning Binary Classification using BNN with Laplace approximation (Laplace Redux).
     Each task introduces a new attack type, but model predicts only binary: benign (0) vs attack (1).
+    Posterior from previous task is used as prior regularizer during current training.
     """
 
     dataset_name = luigi.Parameter()
@@ -891,6 +892,9 @@ class ContinualBNN(luigi.Task):
 
     # Learning rate 
     learning_rate = luigi.FloatParameter(default=0.001)
+
+    # Regularization strength
+    lam = luigi.FloatParameter(default=1.0)
 
     def requires(self):
         # The "split-dataset" (val.csv and test.csv) and "tasks" folders are needed
@@ -910,6 +914,7 @@ class ContinualBNN(luigi.Task):
         logger.info(f'====== PARAMETERS (DATASET {self.dataset_name}) ======')
         logger.info(f'batch_size={self.batch_size}')
         logger.info(f'learning_rate={self.learning_rate}')
+        logger.info(f'lam={self.lam}')
         logger.info('========================')
 
         split_path = self.input()['split-dataset'].path
@@ -920,16 +925,20 @@ class ContinualBNN(luigi.Task):
         test_df = pd.read_csv(os.path.join(split_path, 'test.csv'))
         task_files = sorted(glob.glob(os.path.join(tasks_path, 'task_*.csv')))
 
-        seen_attacks = []
-        model = None
-        metrics = []
+        model = None           # Shared model across tasks
+        laplace = None         # Stores Laplace posterior from previous task
+        metrics = []           # Collect evaluation metrics
+        seen_attacks = []      # Track cumulative test attacks
 
+        # Reuse first task stats for normalization (as per CL setup)
         first_task_mean = None
-        first_task_std = None
+        first_task_std = None  
 
+        # === MAIN CONTINUAL LEARNING LOOP (one task = one attack) ===
         for i, task_file in enumerate(task_files):
             task_df = pd.read_csv(task_file)
 
+            # --- Get current attack class ---
             current_attacks = set(task_df["attack_type"].unique()) - {"benign", "Benign", "normal", "Normal"} 
             assert len(current_attacks) == 1, f"Task file {task_file} must contain exactly 1 attack type"
             current_attack = current_attacks.pop()
@@ -972,10 +981,10 @@ class ContinualBNN(luigi.Task):
                     X_val[col] = (X_val[col] - mean) / std
                     X_test[col] = (X_test[col] - mean) / std
 
+            # --- Convert to Torch tensors ---
             X_train_t = torch.tensor(X_train.values.astype(np.float32))
             X_val_t = torch.tensor(X_val.values.astype(np.float32))
             X_test_t = torch.tensor(X_test.values.astype(np.float32))
-
             y_train_t = torch.tensor(y_train, dtype=torch.long)
             y_val_t = torch.tensor(y_val, dtype=torch.long)
             y_test_t = torch.tensor(y_test, dtype=torch.long)
@@ -983,14 +992,21 @@ class ContinualBNN(luigi.Task):
             train_loader = DataLoader(TensorDataset(X_train_t, y_train_t), batch_size=self.batch_size, shuffle=True)
             val_loader = DataLoader(TensorDataset(X_val_t, y_val_t), batch_size=self.batch_size, shuffle=True)
 
-            # Initialize model if first task
+            # === MODEL INITIALIZATION (first task only) ===
             if model is None:
                 model = MLP(X_train_t.shape[1])
 
             optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
             loss_fn = nn.CrossEntropyLoss()
 
-            # Training loop
+            # === CACHE LOG PRIOR FROM PREVIOUS POSTERIOR ===
+            log_prior = None
+            if laplace is not None:
+                theta_prior = laplace.mean.clone().detach()
+                log_prior = laplace.log_prob(theta_prior) / len(X_train_t)
+                logger.info(f"[TASK {i+1}] Laplace log_prior: {log_prior.item():.6f}")
+
+            # === TRAINING LOOP ===
             for epoch in range(10):
                 model.train()
                 running_loss = 0
@@ -1001,6 +1017,11 @@ class ContinualBNN(luigi.Task):
                     optimizer.zero_grad()
                     out = model(xb)
                     loss = loss_fn(out, yb)
+
+                    # Add Laplace Redux regularization from previous posterior
+                    if laplace is not None:
+                        loss = loss - self.lam * log_prior
+
                     loss.backward()
                     optimizer.step()
                     running_loss += loss.item() * xb.size(0)
@@ -1012,7 +1033,7 @@ class ContinualBNN(luigi.Task):
                 avg_train_loss = running_loss / total_train
                 train_acc = correct_train / total_train
 
-                # Evaluate on validation
+                # === Validation accuracy (no Laplace) ===
                 model.eval()
                 correct_val = 0
                 total_val = 0
@@ -1029,31 +1050,27 @@ class ContinualBNN(luigi.Task):
 
                 avg_val_loss = val_loss / total_val
                 val_acc = correct_val / total_val
-
                 logger.info(f'[TASK {i + 1}] Epoch {epoch+1} | Train Loss: {avg_train_loss:.4f} | Train Acc: {train_acc:.4f} | Val Loss: {avg_val_loss:.4f} | Val Acc: {val_acc:.4f}')
 
-            logger.info(f'Training completed')
+            # === FIT LAPLACE REDUX ===
+            logger.info(f'[TASK {i + 1}] Training completed. Fitting Laplace approximation...')
+            laplace = Laplace(model, 'classification', subset_of_weights='last_layer')
+            laplace.fit(train_loader)
+            laplace.prior_mean = laplace.mean.clone()
+            logger.info(f'[TASK {i + 1}] Laplace fitted')
 
-            # Apply Laplace approximation to the final layer (BNN via Laplace approximation)
-            la = Laplace(model, 'classification', subset_of_weights='last_layer')
-            la.fit(train_loader)
-
-            logger.info('Laplace approximation fitted on last layer')
-
-            # Laplace-adjusted accuracy on val
-            logits_val = la(X_val_t).detach()
+            # === POSTERIOR-BASED VALIDATION & TEST ===
+            logits_val = laplace(X_val_t).detach()
             probs_val = torch.softmax(logits_val, dim=1).numpy()
             y_pred_val = np.argmax(probs_val, axis=1)
             val_acc_post_laplace = accuracy_score(y_val, y_pred_val)
-
             logger.info(f'Post-Laplace validation accuracy: {val_acc_post_laplace:.4f}')
 
-            # Inference
-            model.eval()
-            logits = la(X_test_t).detach()
+            logits = laplace(X_test_t).detach()
             probs = torch.softmax(logits, dim=1).numpy()
             y_pred = np.argmax(probs, axis=1)
 
+            # === METRICS ===
             accuracy = accuracy_score(y_test, y_pred)
             precision = precision_score(y_test, y_pred, average="macro", zero_division=0)
             recall = recall_score(y_test, y_pred, average="macro", zero_division=0)
@@ -1065,6 +1082,9 @@ class ContinualBNN(luigi.Task):
 
             metrics.append({
                 'dataset': self.dataset_name,
+                'learning_rate': self.learning_rate,
+                'batch_size': self.batch_size,
+                'lambda': self.lam,
                 'task': i + 1,
                 'attack': current_attack,
                 "accuracy": accuracy,
@@ -1398,7 +1418,7 @@ class FullDatasetSVDGMM(luigi.Task):
         logger.info(f'Applied SVD with n_components = {self.n_components_SVD}')
 
         logger.info(f'Transformed training set preview:')
-        logger.info(X_train.head())
+        logger.info(f'\n{X_train.head()}')
 
         # Extract labels
         y_train = train_df["attack_type"]
