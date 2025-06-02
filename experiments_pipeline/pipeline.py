@@ -14,6 +14,7 @@ import torch
 from torch import nn
 from torch.utils.data import TensorDataset, DataLoader
 from laplace import Laplace
+from torch.nn.utils import parameters_to_vector
 from sklearn.mixture import BayesianGaussianMixture
 from sklearn.decomposition import TruncatedSVD
 
@@ -958,6 +959,11 @@ class ContinualBNN(luigi.Task):
             X_test = test_seen_df.drop(columns=["attack", "attack_type"])
             y_test = test_seen_df['attack'].astype(int).values
 
+            # For tracking test metrics on the current task and previous tasks
+            test_current_df = test_df[test_df['attack_type'].isin([current_attack, "benign", "Benign", "normal", "Normal"])]
+            test_previous_df = test_df[test_df['attack_type'].isin(seen_attacks[:-1] + ["benign", "Benign", "normal", "Normal"])] \
+                                if i > 0 else None
+
             # Identify columns to normalize: numeric columns, keep also constant ones since they may change among different tasks!
             columns_to_normalize = [numeric_column
                                     for numeric_column in list(X_train.select_dtypes(include=['float', 'int']).columns)]
@@ -968,18 +974,17 @@ class ContinualBNN(luigi.Task):
                 first_task_std = X_train[columns_to_normalize].std()
 
             # --- Z-SCORE NORMALIZATION USING MEAN & STD FROM 1st TASK ---
-            for col in columns_to_normalize:
-                mean = first_task_mean[col]
-                std = first_task_std[col]
-                # Avoid NaN or something that isn't ok
-                if pd.isna(mean) or mean < 1e-8 or pd.isna(std) or std < 1e-8:
-                    X_train[col] = 0.0
-                    X_val[col] = 0.0
-                    X_test[col] = 0.0
-                else:
-                    X_train[col] = (X_train[col] - mean) / std
-                    X_val[col] = (X_val[col] - mean) / std
-                    X_test[col] = (X_test[col] - mean) / std
+            for df in [X_train, X_val, X_test, test_current_df, test_previous_df]:
+                if df is None or df.empty:
+                    continue
+                for col in columns_to_normalize:
+                    mean = first_task_mean[col]
+                    std = first_task_std[col]
+                    # Avoid NaN or something that isn't ok
+                    if pd.isna(mean) or mean < 1e-8 or pd.isna(std) or std < 1e-8:
+                        df[col] = 0.0
+                    else:
+                        df[col] = (df[col] - mean) / std
 
             # --- Convert to Torch tensors ---
             X_train_t = torch.tensor(X_train.values.astype(np.float32))
@@ -1002,8 +1007,8 @@ class ContinualBNN(luigi.Task):
             # === CACHE LOG PRIOR FROM PREVIOUS POSTERIOR ===
             log_prior = None
             if laplace is not None:
-                theta_prior = laplace.mean.clone().detach()
-                log_prior = laplace.log_prob(theta_prior) / len(X_train_t)
+                theta = parameters_to_vector(model.net[-1].parameters()).detach()
+                log_prior = laplace.log_prob(theta) / len(X_train_t)
                 logger.info(f"[TASK {i+1}] Laplace log_prior: {log_prior.item():.6f}")
 
             # === TRAINING LOOP ===
@@ -1057,6 +1062,7 @@ class ContinualBNN(luigi.Task):
             laplace = Laplace(model, 'classification', subset_of_weights='last_layer')
             laplace.fit(train_loader)
             laplace.prior_mean = laplace.mean.clone()
+            laplace.optimize_prior_precision(init_prior_prec=laplace.prior_precision)
             logger.info(f'[TASK {i + 1}] Laplace fitted')
 
             # === POSTERIOR-BASED VALIDATION & TEST ===
@@ -1066,19 +1072,27 @@ class ContinualBNN(luigi.Task):
             val_acc_post_laplace = accuracy_score(y_val, y_pred_val)
             logger.info(f'Post-Laplace validation accuracy: {val_acc_post_laplace:.4f}')
 
-            logits = laplace(X_test_t).detach()
-            probs = torch.softmax(logits, dim=1).numpy()
-            y_pred = np.argmax(probs, axis=1)
+            # === TEST EVALUATIONS - HELPER FUNCTION ===
+            def eval_laplace(X, y, label):
+                logits = laplace(torch.tensor(X.values.astype(np.float32))).detach()
+                probs = torch.softmax(logits, dim=1).numpy()
+                y_pred = np.argmax(probs, axis=1)
+                acc = accuracy_score(y, y_pred)
+                logger.info(f'[TASK {i+1}] {label} accuracy: {acc:.4f}')
+                return {
+                    'accuracy': acc,
+                    'f1_macro': f1_score(y, y_pred, average="macro", zero_division=0),
+                    'f1_weighted': f1_score(y, y_pred, average="weighted", zero_division=0),
+                    'roc_auc': roc_auc_score(y, probs[:, 1])
+                }
 
-            # === METRICS ===
-            accuracy = accuracy_score(y_test, y_pred)
-            precision = precision_score(y_test, y_pred, average="macro", zero_division=0)
-            recall = recall_score(y_test, y_pred, average="macro", zero_division=0)
-            f1_macro = f1_score(y_test, y_pred, average="macro", zero_division=0)
-            f1_weighted = f1_score(y_test, y_pred, average="weighted", zero_division=0)
-            auc_roc = roc_auc_score(y_test, probs[:, 1])
+            # Cumulative, current and previous tasks metrics
+            metrics_cumulative = eval_laplace(X_test, y_test, 'CUMULATIVE')
+            metrics_current = eval_laplace(test_current_df.drop(columns=["attack", "attack_type"]), test_current_df['attack'].astype(int).values, 'CURRENT')
+            metrics_previous = {metric: None for metric in ['accuracy', 'f1_macro', 'f1_weighted', 'roc_auc']} if i == 0 \
+                         else eval_laplace(test_previous_df.drop(columns=["attack", "attack_type"]), test_previous_df['attack'].astype(int).values, 'PREVIOUS')
 
-            logger.info(f'Task {i + 1} -> Accuracy: {accuracy:.4f} | F1 (Macro): {f1_macro:.4f} | F1 (Weighted): {f1_weighted:.4f}')
+            logger.info(f'Task {i + 1} -> Accuracy: {metrics_cumulative["accuracy"]:.4f} | F1 (Macro): {metrics_cumulative["f1_macro"]:.4f} | F1 (Weighted): {metrics_cumulative["f1_weighted"]:.4f}')
 
             metrics.append({
                 'dataset': self.dataset_name,
@@ -1087,12 +1101,9 @@ class ContinualBNN(luigi.Task):
                 'lambda': self.lam,
                 'task': i + 1,
                 'attack': current_attack,
-                "accuracy": accuracy,
-                "precision": precision,
-                "recall": recall,
-                "f1_macro": f1_macro,
-                "f1_weighted": f1_weighted,
-                "roc_auc": auc_roc
+                **{f'cumulative_{k}': v for k, v in metrics_cumulative.items()},
+                **{f'current_{k}': v for k, v in metrics_current.items()},
+                **{f'previous_{k}': v for k, v in metrics_previous.items()}
             })
 
         # --- SAVE MODEL AND METRICS ---
