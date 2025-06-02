@@ -209,7 +209,9 @@ Use the parameter `--target` as "multi" for multi-classification, else "binary".
 
 `--learning-rate` is the learning rate used in the optimizer (by default 0.001).
 
-    python3 -m luigi --module pipeline ContinualBNN --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --local-scheduler
+`--lam` is the regularization strength (by default 1.0).
+
+    python3 -m luigi --module pipeline ContinualBNN --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --lam 1.0 --local-scheduler
 
 ###### Full-Dataset SVD Supervised Gaussian Mixture Models
 
