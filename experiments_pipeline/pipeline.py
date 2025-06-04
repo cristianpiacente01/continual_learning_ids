@@ -17,6 +17,7 @@ from laplace import Laplace
 from torch.nn.utils import parameters_to_vector
 from sklearn.mixture import BayesianGaussianMixture
 from sklearn.decomposition import TruncatedSVD
+import random
 
 # Fix logging for Python 3.12.0
 logging.root.handlers.clear()
@@ -897,8 +898,8 @@ class ContinualBNN(luigi.Task):
     # Regularization strength
     lam = luigi.FloatParameter(default=1.0)
 
-    # Mini batch size used in Laplace for evaluating, needed for logits batches
-    laplace_batch_size = luigi.IntParameter(default=4)
+    # Flag to decide whether to permute tasks or not
+    permute_tasks = luigi.BoolParameter(default=False, parsing=luigi.BoolParameter.EXPLICIT_PARSING)
 
     def requires(self):
         # The "split-dataset" (val.csv and test.csv) and "tasks" folders are needed
@@ -919,7 +920,7 @@ class ContinualBNN(luigi.Task):
         logger.info(f'batch_size={self.batch_size}')
         logger.info(f'learning_rate={self.learning_rate}')
         logger.info(f'lam={self.lam}')
-        logger.info(f'laplace_batch_size={self.laplace_batch_size}')
+        logger.info(f'permute_tasks={self.permute_tasks}')
         logger.info('========================')
 
         split_path = self.input()['split-dataset'].path
@@ -929,6 +930,8 @@ class ContinualBNN(luigi.Task):
         val_df = pd.read_csv(os.path.join(split_path, 'val.csv'))
         test_df = pd.read_csv(os.path.join(split_path, 'test.csv'))
         task_files = sorted(glob.glob(os.path.join(tasks_path, 'task_*.csv')))
+        if self.permute_tasks:
+            random.shuffle(task_files)
 
         model = None           # Shared model across tasks
         laplace = None         # Stores Laplace posterior from previous task
@@ -1072,8 +1075,7 @@ class ContinualBNN(luigi.Task):
             # === POSTERIOR-BASED VALIDATION & TEST ===
             logits_val_list = []
             with torch.no_grad():
-                for j in range(0, X_val_t.size(0), self.laplace_batch_size):
-                    xb = X_val_t[j:j+self.laplace_batch_size]
+                for xb, _ in val_loader:
                     logits_batch = laplace(xb).detach()
                     logits_val_list.append(logits_batch)
 
@@ -1084,15 +1086,13 @@ class ContinualBNN(luigi.Task):
             logger.info(f'Post-Laplace validation accuracy: {val_acc_post_laplace:.4f}')
 
             # === TEST EVALUATIONS - HELPER FUNCTION ===
-            def eval_laplace(X, y, label):
-                X_tensor = torch.tensor(X.values.astype(np.float32))
+            def eval_laplace(loader, y, label):
                 logits_list = []
                 with torch.no_grad():
-                    for j in range(0, X_tensor.size(0), self.laplace_batch_size):
-                        xb = X_tensor[j:j+self.laplace_batch_size]
+                    for xb, _ in loader:
                         logits_batch = laplace(xb).detach()
                         logits_list.append(logits_batch)
-
+            
                 logits = torch.cat(logits_list, dim=0)
                 probs = torch.softmax(logits, dim=1).numpy()
                 y_pred = np.argmax(probs, axis=1)
@@ -1104,12 +1104,26 @@ class ContinualBNN(luigi.Task):
                     'f1_weighted': f1_score(y, y_pred, average="weighted", zero_division=0),
                     'roc_auc': roc_auc_score(y, probs[:, 1])
                 }
+            
+            # Test data loaders
+            test_loader_all = DataLoader(TensorDataset(X_test_t, y_test_t), batch_size=self.batch_size)
+            test_loader_current = DataLoader(TensorDataset(
+                torch.tensor(test_current_df.drop(columns=["attack", "attack_type"]).values.astype(np.float32)),
+                torch.tensor(test_current_df['attack'].astype(int).values)
+            ), batch_size=self.batch_size)
+
+            test_loader_prev = None
+            if i > 0:
+                test_loader_prev = DataLoader(TensorDataset(
+                    torch.tensor(test_previous_df.drop(columns=["attack", "attack_type"]).values.astype(np.float32)),
+                    torch.tensor(test_previous_df['attack'].astype(int).values)
+                ), batch_size=self.batch_size)
 
             # Cumulative, current and previous tasks metrics
-            metrics_cumulative = eval_laplace(X_test, y_test, 'CUMULATIVE')
-            metrics_current = eval_laplace(test_current_df.drop(columns=["attack", "attack_type"]), test_current_df['attack'].astype(int).values, 'CURRENT')
+            metrics_cumulative = eval_laplace(test_loader_all, y_test, 'CUMULATIVE')
+            metrics_current = eval_laplace(test_loader_current, test_current_df['attack'].astype(int).values, 'CURRENT')
             metrics_previous = {metric: None for metric in ['accuracy', 'f1_macro', 'f1_weighted', 'roc_auc']} if i == 0 \
-                         else eval_laplace(test_previous_df.drop(columns=["attack", "attack_type"]), test_previous_df['attack'].astype(int).values, 'PREVIOUS')
+                         else eval_laplace(test_loader_prev, test_previous_df['attack'].astype(int).values, 'PREVIOUS')
 
             logger.info(f'Task {i + 1} -> Accuracy: {metrics_cumulative["accuracy"]:.4f} | F1 (Macro): {metrics_cumulative["f1_macro"]:.4f} | F1 (Weighted): {metrics_cumulative["f1_weighted"]:.4f}')
 
@@ -1118,6 +1132,7 @@ class ContinualBNN(luigi.Task):
                 'learning_rate': self.learning_rate,
                 'batch_size': self.batch_size,
                 'lambda': self.lam,
+                'permute_tasks': self.permute_tasks,
                 'task': i + 1,
                 'attack': current_attack,
                 **{f'cumulative_{k}': v for k, v in metrics_cumulative.items()},
