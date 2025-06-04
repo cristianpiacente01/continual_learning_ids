@@ -897,6 +897,9 @@ class ContinualBNN(luigi.Task):
     # Regularization strength
     lam = luigi.FloatParameter(default=1.0)
 
+    # Mini batch size used in Laplace for evaluating, needed for logits batches
+    laplace_batch_size = luigi.IntParameter(default=4)
+
     def requires(self):
         # The "split-dataset" (val.csv and test.csv) and "tasks" folders are needed
         class FakeTask(luigi.Task):
@@ -916,6 +919,7 @@ class ContinualBNN(luigi.Task):
         logger.info(f'batch_size={self.batch_size}')
         logger.info(f'learning_rate={self.learning_rate}')
         logger.info(f'lam={self.lam}')
+        logger.info(f'laplace_batch_size={self.laplace_batch_size}')
         logger.info('========================')
 
         split_path = self.input()['split-dataset'].path
@@ -1007,8 +1011,8 @@ class ContinualBNN(luigi.Task):
             # === CACHE LOG PRIOR FROM PREVIOUS POSTERIOR ===
             log_prior = None
             if laplace is not None:
-                theta = parameters_to_vector(model.net[-1].parameters()).detach()
-                log_prior = laplace.log_prob(theta) / len(X_train_t)
+                theta = parameters_to_vector(model.parameters()).detach()
+                log_prior = laplace.log_prob(theta) / len(X_train_t) # the division is needed, otherwise it's huge!
                 logger.info(f"[TASK {i+1}] Laplace log_prior: {log_prior.item():.6f}")
 
             # === TRAINING LOOP ===
@@ -1059,14 +1063,21 @@ class ContinualBNN(luigi.Task):
 
             # === FIT LAPLACE REDUX ===
             logger.info(f'[TASK {i + 1}] Training completed. Fitting Laplace approximation...')
-            laplace = Laplace(model, 'classification', subset_of_weights='last_layer')
+            laplace = Laplace(model, 'classification', subset_of_weights='all', hessian_structure='kron')
             laplace.fit(train_loader)
             laplace.prior_mean = laplace.mean.clone()
             laplace.optimize_prior_precision(init_prior_prec=laplace.prior_precision)
             logger.info(f'[TASK {i + 1}] Laplace fitted')
 
             # === POSTERIOR-BASED VALIDATION & TEST ===
-            logits_val = laplace(X_val_t).detach()
+            logits_val_list = []
+            with torch.no_grad():
+                for j in range(0, X_val_t.size(0), self.laplace_batch_size):
+                    xb = X_val_t[j:j+self.laplace_batch_size]
+                    logits_batch = laplace(xb).detach()
+                    logits_val_list.append(logits_batch)
+
+            logits_val = torch.cat(logits_val_list, dim=0)
             probs_val = torch.softmax(logits_val, dim=1).numpy()
             y_pred_val = np.argmax(probs_val, axis=1)
             val_acc_post_laplace = accuracy_score(y_val, y_pred_val)
@@ -1074,7 +1085,15 @@ class ContinualBNN(luigi.Task):
 
             # === TEST EVALUATIONS - HELPER FUNCTION ===
             def eval_laplace(X, y, label):
-                logits = laplace(torch.tensor(X.values.astype(np.float32))).detach()
+                X_tensor = torch.tensor(X.values.astype(np.float32))
+                logits_list = []
+                with torch.no_grad():
+                    for j in range(0, X_tensor.size(0), self.laplace_batch_size):
+                        xb = X_tensor[j:j+self.laplace_batch_size]
+                        logits_batch = laplace(xb).detach()
+                        logits_list.append(logits_batch)
+
+                logits = torch.cat(logits_list, dim=0)
                 probs = torch.softmax(logits, dim=1).numpy()
                 y_pred = np.argmax(probs, axis=1)
                 acc = accuracy_score(y, y_pred)
