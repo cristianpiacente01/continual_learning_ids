@@ -211,7 +211,9 @@ Use the parameter `--target` as "multi" for multi-classification, else "binary".
 
 `--lam` is the regularization strength (by default 1.0).
 
-    python3 -m luigi --module pipeline ContinualBNN --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --lam 1.0 --local-scheduler
+`--laplace-batch-size` is the size of mini batches used for Laplace evaluations (by default 4).
+
+    python3 -m luigi --module pipeline ContinualBNN --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --lam 1.0 --laplace-batch-size 4 --local-scheduler
 
 ###### Full-Dataset SVD Supervised Gaussian Mixture Models
 
