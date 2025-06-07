@@ -18,6 +18,7 @@ from torch.nn.utils import parameters_to_vector
 from sklearn.mixture import BayesianGaussianMixture
 from sklearn.decomposition import TruncatedSVD
 import random
+from laplace.curvature.asdl import AsdlGGN
 
 # Fix logging for Python 3.12.0
 logging.root.handlers.clear()
@@ -1066,7 +1067,7 @@ class ContinualBNN(luigi.Task):
 
             # === FIT LAPLACE REDUX ===
             logger.info(f'[TASK {i + 1}] Training completed. Fitting Laplace approximation...')
-            laplace = Laplace(model, 'classification', subset_of_weights='all', hessian_structure='kron')
+            laplace = Laplace(model, 'classification', subset_of_weights='all', hessian_structure='kron', backend=AsdlGGN)
             laplace.fit(train_loader)
             laplace.prior_mean = laplace.mean.clone()
             laplace.optimize_prior_precision(init_prior_prec=laplace.prior_precision)
@@ -1076,21 +1077,21 @@ class ContinualBNN(luigi.Task):
             logits_val_list = []
             with torch.no_grad():
                 for xb, _ in val_loader:
-                    logits_batch = laplace(xb).detach()
+                    logits_batch = model(xb).detach()
                     logits_val_list.append(logits_batch)
 
             logits_val = torch.cat(logits_val_list, dim=0)
             probs_val = torch.softmax(logits_val, dim=1).numpy()
             y_pred_val = np.argmax(probs_val, axis=1)
             val_acc_post_laplace = accuracy_score(y_val, y_pred_val)
-            logger.info(f'Post-Laplace validation accuracy: {val_acc_post_laplace:.4f}')
+            logger.info(f'Validation accuracy: {val_acc_post_laplace:.4f}')
 
             # === TEST EVALUATIONS - HELPER FUNCTION ===
-            def eval_laplace(loader, y, label):
+            def eval_metrics(loader, y, label):
                 logits_list = []
                 with torch.no_grad():
                     for xb, _ in loader:
-                        logits_batch = laplace(xb).detach()
+                        logits_batch = model(xb).detach()
                         logits_list.append(logits_batch)
             
                 logits = torch.cat(logits_list, dim=0)
@@ -1120,10 +1121,10 @@ class ContinualBNN(luigi.Task):
                 ), batch_size=self.batch_size)
 
             # Cumulative, current and previous tasks metrics
-            metrics_cumulative = eval_laplace(test_loader_all, y_test, 'CUMULATIVE')
-            metrics_current = eval_laplace(test_loader_current, test_current_df['attack'].astype(int).values, 'CURRENT')
+            metrics_cumulative = eval_metrics(test_loader_all, y_test, 'CUMULATIVE')
+            metrics_current = eval_metrics(test_loader_current, test_current_df['attack'].astype(int).values, 'CURRENT')
             metrics_previous = {metric: None for metric in ['accuracy', 'f1_macro', 'f1_weighted', 'roc_auc']} if i == 0 \
-                         else eval_laplace(test_loader_prev, test_previous_df['attack'].astype(int).values, 'PREVIOUS')
+                         else eval_metrics(test_loader_prev, test_previous_df['attack'].astype(int).values, 'PREVIOUS')
 
             logger.info(f'Task {i + 1} -> Accuracy: {metrics_cumulative["accuracy"]:.4f} | F1 (Macro): {metrics_cumulative["f1_macro"]:.4f} | F1 (Weighted): {metrics_cumulative["f1_weighted"]:.4f}')
 
