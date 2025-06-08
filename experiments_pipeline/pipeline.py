@@ -581,6 +581,11 @@ class ContinualSupervisedGMM(luigi.Task):
             X_test = test_seen_df.drop(columns=["attack", "attack_type"])
             y_test = test_seen_df["attack_type"].map(label_map)
 
+            # For tracking test metrics on the current task and previous tasks
+            test_current_df = test_df[test_df["attack_type"] == current_attack]
+            test_previous_df = test_df[test_df["attack_type"].isin(seen_attack_types - {current_attack})] \
+                                if i > 0 else None
+
             # Identify columns to normalize: numeric columns, keep also constant ones since they may change among different tasks!
             columns_to_normalize = [numeric_column
                                     for numeric_column in list(X_train.select_dtypes(include=['float', 'int']).columns)]
@@ -591,18 +596,17 @@ class ContinualSupervisedGMM(luigi.Task):
                 first_task_std = X_train[columns_to_normalize].std()
             
             # --- Z-SCORE NORMALIZATION USING MEAN & STD FROM 1st TASK ---
-            for col in columns_to_normalize:
-                mean = first_task_mean[col]
-                std = first_task_std[col]
-                # Avoid NaN or something that isn't ok for training a GMM
-                if pd.isna(mean) or mean < 1e-8 or pd.isna(std) or std < 1e-8:
-                    X_train[col] = 0.0
-                    X_val[col] = 0.0
-                    X_test[col] = 0.0
-                else:
-                    X_train[col] = (X_train[col] - mean) / std
-                    X_val[col] = (X_val[col] - mean) / std
-                    X_test[col] = (X_test[col] - mean) / std
+            for df in [X_train, X_val, X_test, test_current_df, test_previous_df]:
+                if df is None or df.empty:
+                    continue
+                for col in columns_to_normalize:
+                    mean = first_task_mean[col]
+                    std = first_task_std[col]
+                    # Avoid NaN or something that isn't ok for training a GMM
+                    if pd.isna(mean) or mean < 1e-8 or pd.isna(std) or std < 1e-8:
+                        df[col] = 0.0
+                    else:
+                        df[col] = (df[col] - mean) / std
 
             # Train new GMM for current attack
             gmm = GaussianMixture(n_components=self.n_components,
@@ -622,24 +626,34 @@ class ContinualSupervisedGMM(luigi.Task):
             class_sample_counts[class_idx] += len(X_train)
             total_samples_seen = sum(class_sample_counts.values())
 
-            # Compute log-likelihood + log-prior for each class
-            log_likelihoods = np.zeros((X_test.shape[0], len(gmms)))
-            for gmm_class_idx, gmm_model in gmms.items():
-                log_likelihood = gmm_model.score_samples(X_test)
-                prior_prob = class_sample_counts[gmm_class_idx] / total_samples_seen
-                log_prior = np.log(prior_prob)
-                log_likelihoods[:, gmm_class_idx] = log_likelihood + log_prior
-
-            y_pred = np.argmax(log_likelihoods, axis=1)
-
-            # Evaluation
-            accuracy = accuracy_score(y_test, y_pred)
-            precision = precision_score(y_test, y_pred, average="macro", zero_division=0)
-            recall = recall_score(y_test, y_pred, average="macro", zero_division=0)
-            f1_macro = f1_score(y_test, y_pred, average="macro", zero_division=0)
-            f1_weighted = f1_score(y_test, y_pred, average="weighted", zero_division=0)
-
-            logger.info(f'Task {i + 1} -> Accuracy: {accuracy:.4f} | F1 (Macro): {f1_macro:.4f} | F1 (Weighted): {f1_weighted:.4f}')
+            # === TEST EVALUATIONS - HELPER FUNCTION ===
+            def eval_metrics(X, y, label):
+                # Compute log-likelihood + log-prior for each class
+                log_likelihoods = np.zeros((X.shape[0], len(gmms)))
+                for gmm_class_idx, gmm_model in gmms.items():
+                    log_likelihood = gmm_model.score_samples(X)
+                    prior_prob = class_sample_counts[gmm_class_idx] / total_samples_seen
+                    log_prior = np.log(prior_prob)
+                    log_likelihoods[:, gmm_class_idx] = log_likelihood + log_prior
+                
+                y_pred = np.argmax(log_likelihoods, axis=1)
+                acc = accuracy_score(y, y_pred)
+                logger.info(f'[TASK {i+1}] {label} accuracy: {acc:.4f}')
+                return {
+                    'accuracy': acc,
+                    'f1_macro': f1_score(y, y_pred, average="macro", zero_division=0),
+                    'f1_weighted': f1_score(y, y_pred, average="weighted", zero_division=0)
+                }
+            
+            # Cumulative, current and previous tasks metrics
+            metrics_cumulative = eval_metrics(X_test, y_test, "CUMULATIVE")
+            metrics_current = eval_metrics(test_current_df.drop(columns=["attack", "attack_type"]), 
+                                           test_current_df["attack_type"].map(label_map), 
+                                           'CURRENT')
+            metrics_previous = {metric: None for metric in ['accuracy', 'f1_macro', 'f1_weighted']} if i == 0 \
+                         else eval_metrics(test_previous_df.drop(columns=["attack", "attack_type"]), 
+                                           test_previous_df['attack_type'].map(label_map), 
+                                           'PREVIOUS')
             
             metrics.append({
                 "dataset": self.dataset_name,
@@ -648,11 +662,9 @@ class ContinualSupervisedGMM(luigi.Task):
                 "reg_covar": self.reg_covar,
                 "task": i + 1,
                 "attack": current_attack,
-                "accuracy": accuracy,
-                "precision": precision,
-                "recall": recall,
-                "f1_macro": f1_macro,
-                "f1_weighted": f1_weighted,
+                **{f'cumulative_{k}': v for k, v in metrics_cumulative.items()},
+                **{f'current_{k}': v for k, v in metrics_current.items()},
+                **{f'previous_{k}': v for k, v in metrics_previous.items()},
                 "aic_val": aic
             })
 
