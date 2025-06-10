@@ -1024,13 +1024,6 @@ class ContinualBNN(luigi.Task):
             optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
             loss_fn = nn.CrossEntropyLoss()
 
-            # === CACHE LOG PRIOR FROM PREVIOUS POSTERIOR ===
-            log_prior = None
-            if laplace is not None:
-                theta = parameters_to_vector(model.parameters()).detach()
-                log_prior = laplace.log_prob(theta) / len(X_train_t) # the division is needed, otherwise it's huge!
-                logger.info(f"[TASK {i+1}] Laplace log_prior: {log_prior.item():.6f}")
-
             # === TRAINING LOOP ===
             for epoch in range(10):
                 model.train()
@@ -1045,6 +1038,8 @@ class ContinualBNN(luigi.Task):
 
                     # Add Laplace Redux regularization from previous posterior
                     if laplace is not None:
+                        theta = parameters_to_vector(model.parameters())
+                        log_prior = laplace.log_prob(theta) / len(xb)  # divide by batch size
                         loss = loss - self.lam * log_prior
 
                     loss.backward()
