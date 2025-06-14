@@ -43,10 +43,11 @@ cfg = {
 
     'models_folder': config.get('ExperimentsPipeline', 'models_folder'),
     'metrics_rel_filename': config.get('ExperimentsPipeline', 'metrics_rel_filename'),
-    'bnn_metrics_rel_filename': config.get('ExperimentsPipeline', 'bnn_metrics_rel_filename'),
+    'nn_metrics_rel_filename': config.get('ExperimentsPipeline', 'nn_metrics_rel_filename'),
     'continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'continual_metrics_rel_filename'),
     'bnn_continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'bnn_continual_metrics_rel_filename'),
     'bayesian_continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'bayesian_continual_metrics_rel_filename'),
+    'bnn_gmm_continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'bnn_gmm_continual_metrics_rel_filename'),
 }
 
 # Retrieve a relative path w.r.t the dataset name in the datasets folder
@@ -403,7 +404,7 @@ class FullDatasetSupervisedGMM(luigi.Task):
                 gmm = GaussianMixture(n_components=n_components,
                                       covariance_type=self.covariance_type,
                                       reg_covar=self.reg_covar,
-                                      random_state=42)
+                                      random_state=np.random.default_rng().integers(0, 2**32 - 1)) # random seed
                 gmm.fit(X_train_class)
                 class_gmms[class_idx] = gmm
 
@@ -513,6 +514,9 @@ class ContinualSupervisedGMM(luigi.Task):
     # Number of components used to represent each attack type, this number is fixed
     n_components = luigi.IntParameter(default=3)
 
+    # Flag to decide whether to permute tasks or not
+    permute_tasks = luigi.BoolParameter(default=False, parsing=luigi.BoolParameter.EXPLICIT_PARSING)
+
     def requires(self):
         # The "split-dataset" (val.csv and test.csv) and "tasks" folders are needed
         class FakeTask(luigi.Task):
@@ -541,6 +545,8 @@ class ContinualSupervisedGMM(luigi.Task):
         val_df = pd.read_csv(os.path.join(split_path, "val.csv"))
         test_df = pd.read_csv(os.path.join(split_path, "test.csv"))
         task_files = sorted(glob.glob(os.path.join(tasks_path, "task_*.csv")))
+        if self.permute_tasks:
+            random.shuffle(task_files)
 
         label_map = {}
         next_class_index = 0
@@ -693,9 +699,9 @@ class ContinualSupervisedGMM(luigi.Task):
 
 
 
-class FullDatasetBNN(luigi.Task):
+class FullDatasetNN(luigi.Task):
     """
-    Full-dataset binary classification using a BNN implemented via Laplace approximation on a fixed MLP architecture
+    Full-dataset binary classification using a NN
     """
 
     dataset_name = luigi.Parameter()
@@ -724,7 +730,10 @@ class FullDatasetBNN(luigi.Task):
         logger.info(f'learning_rate={self.learning_rate}')
         logger.info('========================')
 
-         # Load the train dataset
+        # Set PyTorch random seed
+        torch.manual_seed(np.random.default_rng().integers(0, 2**32 - 1))
+
+        # Load the train dataset
         train_df = pd.read_csv(os.path.join(self.input().path, 'train.csv'))
 
         logger.info(f'Loaded train set from {self.input().path}/train.csv')
@@ -822,23 +831,15 @@ class FullDatasetBNN(luigi.Task):
 
         logger.info(f'Training completed')
 
-        # Apply Laplace approximation to the final layer (BNN via Laplace approximation)
-        la = Laplace(model, 'classification', subset_of_weights='last_layer')
-        la.fit(train_loader)
-
-        logger.info('Laplace approximation fitted on last layer')
-
-        # Laplace-adjusted accuracy on val
-        logits_val = la(X_val_t).detach()
+        logits_val = model(X_val_t).detach()
         probs_val = torch.softmax(logits_val, dim=1).numpy()
         y_pred_val = np.argmax(probs_val, axis=1)
         val_acc_post_laplace = accuracy_score(y_val, y_pred_val)
-
-        logger.info(f'Post-Laplace validation accuracy: {val_acc_post_laplace:.4f}')
+        logger.info(f'Validation accuracy: {val_acc_post_laplace:.4f}')
 
         # Inference
         model.eval()
-        logits = la(X_test_t).detach()
+        logits = model(X_test_t).detach()
         probs = torch.softmax(logits, dim=1).numpy()
         y_pred = np.argmax(probs, axis=1)
 
@@ -859,10 +860,10 @@ class FullDatasetBNN(luigi.Task):
         logger.info(f'-> AUROC: {auc_roc}')
         
         # Save model and metrics
-        model_name = "Full-Dataset_BNN_Binary_Laplace"
+        model_name = "Full-Dataset_NN_Binary_Laplace"
         model_folder = get_full_model_rel_path(self.dataset_name, '')
         model_file = os.path.join(model_folder, f'{model_name}_weights.pt')
-        metrics_csv = get_full_model_rel_path(self.dataset_name, cfg['bnn_metrics_rel_filename'])
+        metrics_csv = get_full_model_rel_path(self.dataset_name, cfg['nn_metrics_rel_filename'])
 
         # Create the folders if they don't exist
         os.makedirs(os.path.dirname(metrics_csv), exist_ok=True)
@@ -1599,3 +1600,253 @@ class FullDatasetSVDGMM(luigi.Task):
 
         logger.info(f'Saved the metrics to {metrics_csv}')
         logger.info(f'Finished task {self.__class__.__name__}')
+
+
+
+class ContinualBNNPlusGMM(luigi.Task):
+    """
+    Final continual model: binary BNN (Laplace Redux) + GMM multi-class only on attack predictions.
+    """
+
+    dataset_name = luigi.Parameter()
+
+    batch_size = luigi.IntParameter(default=128)
+
+    learning_rate = luigi.FloatParameter(default=0.001)
+
+    lam = luigi.FloatParameter(default=1.0)
+
+    permute_tasks = luigi.BoolParameter(default=False, parsing=luigi.BoolParameter.EXPLICIT_PARSING)
+
+    covariance_type = luigi.Parameter(default="full")
+    
+    reg_covar = luigi.FloatParameter(default=1e-6)
+
+    n_components = luigi.IntParameter(default=3)
+
+    def requires(self):
+        # The "split-dataset" (test.csv) and "tasks" folders are needed
+        class FakeTask(luigi.Task):
+            def output(_):
+                return {'split-dataset': DirectoryTarget(get_full_dataset_rel_path(self.dataset_name, 
+                                                                cfg['split_closed_set_rel_folder'])),
+                        'tasks': DirectoryTarget(get_full_dataset_rel_path(self.dataset_name, 
+                                                                           cfg['tasks_rel_folder']))}
+        return FakeTask()
+
+
+    def run(self):
+        logger.info(f'Started task {self.__class__.__name__}')
+
+        logger.info(f'====== PARAMETERS (DATASET {self.dataset_name}) ======')
+        logger.info(f'batch_size={self.batch_size}')
+        logger.info(f'learning_rate={self.learning_rate}')
+        logger.info(f'lam={self.lam}')
+        logger.info(f'permute_tasks={self.permute_tasks}')
+        logger.info(f'covariance_type={self.covariance_type}')
+        logger.info(f'reg_covar={self.reg_covar}')
+        logger.info(f'n_components={self.n_components}')
+        logger.info('========================')
+
+        # === Load data and task files ===
+        split_path = self.input()['split-dataset'].path
+        tasks_path = self.input()['tasks'].path
+        test_df = pd.read_csv(os.path.join(split_path, "test.csv"))
+        task_files = sorted(glob.glob(os.path.join(tasks_path, "task_*.csv")))
+        if self.permute_tasks:
+            random.shuffle(task_files)
+
+        # === Initialize state ===
+        seen_attacks = []
+        class_idx_map = {}  # benign is handled via is_benign (class 0)
+        next_class_idx = 1
+        gmm_models = {}
+        class_counts = {}
+        metrics = []
+
+        first_task_mean, first_task_std = None, None
+        model, laplace = None, None
+
+        def is_benign(attack_type):
+            return str(attack_type).strip().lower() in {"benign", "normal"}
+
+        def normalize(df):
+            for col in columns_to_normalize:
+                mean, std = first_task_mean[col], first_task_std[col]
+                df[col] = 0.0 if pd.isna(mean) or pd.isna(std) or std < 1e-8 else (df[col] - mean) / std
+            return df
+
+        def predict_system(X_np, y_true_cls=None):  # y_true_cls is for debug
+            with torch.no_grad():
+                probs = torch.softmax(model(torch.tensor(X_np, dtype=torch.float32)), dim=1).detach().numpy()
+
+            p_attack = probs[:, 1]
+            binary_preds = (p_attack > 0.5).astype(int)
+
+            if y_true_cls is not None:
+                true_attacks = (y_true_cls != 0)
+                detected_attacks = binary_preds == 1
+                TP = np.sum(true_attacks & detected_attacks)
+                FN = np.sum(true_attacks & (binary_preds == 0))
+                FP = np.sum((~true_attacks) & (binary_preds == 1))
+                TN = np.sum((~true_attacks) & (binary_preds == 0))
+                logger.info(f"[BNN] TP={TP}, FN={FN}, FP={FP}, TN={TN}")
+                logger.info(f"[BNN] P(attack) stats: mean={p_attack.mean():.3f}, min={p_attack.min():.3f}, max={p_attack.max():.3f}")
+
+            y_pred = np.full(len(X_np), 0)
+
+            if np.any(binary_preds == 1):
+                X_attack = X_np[binary_preds == 1]
+                cls_keys = list(gmm_models.keys())
+                log_likelihoods = np.zeros((X_attack.shape[0], len(cls_keys)))
+                total = sum(class_counts.values())
+
+                for idx, cls in enumerate(cls_keys):
+                    gmm = gmm_models[cls]
+                    log_likelihoods[:, idx] = gmm.score_samples(X_attack) + np.log(class_counts[cls] / total)
+
+                gmm_preds = np.argmax(log_likelihoods, axis=1)
+                y_attack = np.array([cls_keys[i] for i in gmm_preds])
+                y_pred[binary_preds == 1] = y_attack
+
+            return y_pred
+
+
+        # === Iterate over tasks ===
+        for i, task_file in enumerate(task_files):
+            logger.info(f"=========== TASK {i+1} ===========")
+            task_df = pd.read_csv(task_file)
+
+            current_attacks = set(a for a in task_df["attack_type"].unique() if not is_benign(a))
+            assert len(current_attacks) == 1
+            current_attack = current_attacks.pop()
+            seen_attacks.append(current_attack)
+            logger.info(f"Current attack: {current_attack}")
+
+            if current_attack not in class_idx_map:
+                class_idx_map[current_attack] = next_class_idx
+                next_class_idx += 1
+
+            # === Prepare training data ===
+            X_train_df = task_df.drop(columns=["attack", "attack_type"])
+            y_train_bin = task_df["attack"].astype(int).values
+            y_train_cls = np.full(len(X_train_df), class_idx_map[current_attack])
+
+            columns_to_normalize = list(X_train_df.select_dtypes(include=["float", "int"]).columns)
+            if first_task_mean is None:
+                first_task_mean = X_train_df[columns_to_normalize].mean()
+                first_task_std = X_train_df[columns_to_normalize].std()
+            X_train_df = normalize(X_train_df)
+
+            X_train = torch.tensor(X_train_df.values.astype(np.float32))
+            y_train_bin_t = torch.tensor(y_train_bin, dtype=torch.long)
+            train_loader = DataLoader(TensorDataset(X_train, y_train_bin_t), batch_size=self.batch_size, shuffle=True)
+
+            # === Initialize and train BNN ===
+            if model is None:
+                model = MLP(X_train.shape[1])
+                logger.info(f"Initialized MLP with input dim = {X_train.shape[1]}")
+
+            logger.info("Training BNN...")
+            opt = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
+            loss_fn = nn.CrossEntropyLoss()
+            for _ in range(10):
+                model.train()
+                for xb, yb in train_loader:
+                    opt.zero_grad()
+                    out = model(xb)
+                    loss = loss_fn(out, yb)
+                    if laplace is not None:
+                        theta = parameters_to_vector(model.parameters())
+                        log_prior = laplace.log_prob(theta) / len(xb)
+                        loss = loss - self.lam * log_prior
+                    loss.backward()
+                    opt.step()
+
+            # === Fit Laplace ===
+            logger.info("Fitting Laplace...")
+            laplace = Laplace(model, 'classification', subset_of_weights='all', hessian_structure='kron', backend=AsdlGGN)
+            laplace.fit(train_loader)
+            laplace.prior_mean = laplace.mean.clone()
+            laplace.optimize_prior_precision()
+            logger.info("Laplace fit complete.")
+
+            # === Train GMMs ===
+            X_train_attack = X_train_df.values[y_train_bin == 1]
+            y_train_attack = y_train_cls[y_train_bin == 1]
+            logger.info(f"{len(X_train_attack)} training samples labeled as attack (for GMM training)")
+
+            for cls in np.unique(y_train_attack):
+                X_cls = X_train_attack[y_train_attack == cls]
+                gmm = GaussianMixture(n_components=self.n_components,
+                                    covariance_type=self.covariance_type,
+                                    reg_covar=self.reg_covar,
+                                    random_state=42)
+                gmm.fit(X_cls)
+                gmm_models[cls] = gmm
+                class_counts[cls] = class_counts.get(cls, 0) + len(X_cls)
+                logger.info(f"Trained GMM for class {cls} with {len(X_cls)} samples")
+
+            # === Evaluate cumulative ===
+            test_seen_df = test_df[test_df["attack_type"].apply(lambda x: x in seen_attacks or is_benign(x))].copy()
+            X_test_np = normalize(test_seen_df.drop(columns=["attack", "attack_type"])).values.astype(np.float32)
+            y_true_cls = test_seen_df["attack_type"].apply(lambda x: class_idx_map.get(x) if not is_benign(x) else 0).values
+            y_pred_cls = predict_system(X_test_np, y_true_cls)
+
+            scores = {
+                "accuracy": accuracy_score(y_true_cls, y_pred_cls),
+                "f1_macro": f1_score(y_true_cls, y_pred_cls, average="macro", zero_division=0),
+                "f1_weighted": f1_score(y_true_cls, y_pred_cls, average="weighted", zero_division=0)
+            }
+
+            # === Evaluate current ===
+            current_df = test_df[test_df["attack_type"].apply(lambda x: x == current_attack or is_benign(x))].copy()
+            X_curr_np = normalize(current_df.drop(columns=["attack", "attack_type"])).values.astype(np.float32)
+            y_curr = current_df["attack_type"].apply(lambda x: class_idx_map.get(x) if not is_benign(x) else 0).values
+            y_pred_curr = predict_system(X_curr_np, y_curr)
+            scores_current = {
+                "accuracy": accuracy_score(y_curr, y_pred_curr),
+                "f1_macro": f1_score(y_curr, y_pred_curr, average="macro", zero_division=0),
+                "f1_weighted": f1_score(y_curr, y_pred_curr, average="weighted", zero_division=0)
+            }
+
+            # === Evaluate previous ===
+            if i > 0:
+                previous_df = test_df[test_df["attack_type"].apply(lambda x: x in seen_attacks[:-1] or is_benign(x))].copy()
+                X_prev_np = normalize(previous_df.drop(columns=["attack", "attack_type"])).values.astype(np.float32)
+                y_prev = previous_df["attack_type"].apply(lambda x: class_idx_map.get(x) if not is_benign(x) else 0).values
+                y_pred_prev = predict_system(X_prev_np, y_prev)
+                scores_previous = {
+                    "accuracy": accuracy_score(y_prev, y_pred_prev),
+                    "f1_macro": f1_score(y_prev, y_pred_prev, average="macro", zero_division=0),
+                    "f1_weighted": f1_score(y_prev, y_pred_prev, average="weighted", zero_division=0)
+                }
+            else:
+                scores_previous = {k: None for k in ["accuracy", "f1_macro", "f1_weighted"]}
+
+            # === Save metrics for task ===
+            metrics.append({
+                "dataset": self.dataset_name,
+                "task": i + 1,
+                "attack": current_attack,
+                "lambda": self.lam,
+                "batch_size": self.batch_size,
+                "learning_rate": self.learning_rate,
+                "permute_tasks": self.permute_tasks,
+                "n_components": self.n_components,
+                "covariance_type": self.covariance_type,
+                "reg_covar": self.reg_covar,
+                **{f"cumulative_{k}": scores[k] for k in scores},
+                **{f"current_{k}": scores_current[k] for k in scores_current},
+                **{f"previous_{k}": scores_previous[k] for k in scores_previous}
+            })
+
+        # === Save all results ===
+        csv_path = get_full_model_rel_path(self.dataset_name, cfg["bnn_gmm_continual_metrics_rel_filename"])
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        df = pd.DataFrame(metrics)
+        logger.info(f"\n{df}")
+        with open(csv_path, 'a') as f:
+            df.to_csv(f, mode='a', header=f.tell() == 0, index=False, lineterminator='\n')
+        logger.info(f"Saved metrics to {csv_path}")
+        logger.info(f"Finished task {self.__class__.__name__}")

@@ -177,7 +177,9 @@ Use the parameter `--target` as "multi" for multi-classification, else "binary".
 
 `--n-components` is the number of components globally in GMMs (by default 3).
 
-    python3 -m luigi --module pipeline ContinualSupervisedGMM --dataset-name "CIC-IDS2017" --covariance-type "full" --reg-covar 1e-6 --n-components 3 --local-scheduler
+`--permute-tasks` is a flag representing whether to use random permutations for tasks or not (by default false).
+
+    python3 -m luigi --module pipeline ContinualSupervisedGMM --dataset-name "CIC-IDS2017" --covariance-type "full" --reg-covar 1e-6 --n-components 3 --permute-tasks false --local-scheduler
 
 ###### Continual Learning Bayesian GMM
 
@@ -195,13 +197,13 @@ Use the parameter `--target` as "multi" for multi-classification, else "binary".
 
     python3 -m luigi --module pipeline ContinualBayesianGMM --dataset-name "CIC-IDS2017" --covariance-type "full" --reg-covar 1e-6 --n-components 3 --weight-concentration-prior-type "dirichlet_process" --weight-concentration-prior 0.01 --max-iter 100 --local-scheduler
 
-###### Full-Dataset Bayesian Neural Network (MLP, Laplace approximation)
+###### Full-Dataset Neural Network
 
 `--batch-size` is an integer representing the batch size used in the data loader (by default 128).
 
 `--learning-rate` is the learning rate used in the optimizer (by default 0.001).
 
-    python3 -m luigi --module pipeline FullDatasetBNN --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --local-scheduler
+    python3 -m luigi --module pipeline FullDatasetNN --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --local-scheduler
 
 ###### Continual Learning Bayesian Neural Network (MLP, Laplace approximation)
 
@@ -222,3 +224,11 @@ Use the parameter `--target` as "multi" for multi-classification, else "binary".
 This Luigi task was created for experimenting with TON-IoT dataset in particular, so the default values refer to the best combination found for it.
 
     python3 -m luigi --module pipeline FullDatasetSVDGMM --dataset-name "TON-IoT" --attack-only true --train-percentage 100 --max-components 5 --covariance-type "full" --reg-covar 1e-2 --tune-n-components true --selection-metric "AIC" --n-components-SVD 30 --local-scheduler
+
+###### FINAL SYSTEM - Continual Learning BNN + GMM
+
+This is the final system made of two modules: BNN for binary classification, then the data classified as attack is passed to GMMs for multi-class classification.
+
+It is based on the experiments **Continual Learning Bayesian Neural Network** and **Continual Learning Supervised GMM**.
+
+    python3 -m luigi --module pipeline ContinualBNNPlusGMM --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --lam 1.0 --permute-tasks false --covariance-type "full" --reg-covar 1e-6 --n-components 3 --local-scheduler
