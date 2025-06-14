@@ -666,6 +666,7 @@ class ContinualSupervisedGMM(luigi.Task):
                 "n_components": self.n_components,
                 "covariance_type": self.covariance_type,
                 "reg_covar": self.reg_covar,
+                "permute_tasks": self.permute_tasks,
                 "task": i + 1,
                 "attack": current_attack,
                 **{f'cumulative_{k}': v for k, v in metrics_cumulative.items()},
