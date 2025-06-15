@@ -277,7 +277,7 @@ class FullDatasetSupervisedGMM(luigi.Task):
     dataset_name = luigi.Parameter()
 
     # Filter only attack data
-    attack_only = luigi.BoolParameter(default=False, parsing=luigi.BoolParameter.EXPLICIT_PARSING) 
+    attack_only = luigi.BoolParameter(default=True, parsing=luigi.BoolParameter.EXPLICIT_PARSING) 
 
     # Percentage of training data to use
     train_percentage = luigi.IntParameter(default=100) 
@@ -861,7 +861,7 @@ class FullDatasetNN(luigi.Task):
         logger.info(f'-> AUROC: {auc_roc}')
         
         # Save model and metrics
-        model_name = "Full-Dataset_NN_Binary_Laplace"
+        model_name = "Full-Dataset_NN_Binary"
         model_folder = get_full_model_rel_path(self.dataset_name, '')
         model_file = os.path.join(model_folder, f'{model_name}_weights.pt')
         metrics_csv = get_full_model_rel_path(self.dataset_name, cfg['nn_metrics_rel_filename'])

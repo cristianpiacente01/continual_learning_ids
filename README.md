@@ -153,7 +153,7 @@ Use the parameter `--target` as "multi" for multi-classification, else "binary".
 
 ###### Full-Dataset Supervised Gaussian Mixture Models
 
-`--attack-only` is a flag used for filtering only attack data when true (by default false).
+`--attack-only` is a flag used for filtering only attack data when true (by default true).
 
 `--train-percentage` is an integer representing the percentage of the training data to consider (by default 100).
 
@@ -167,7 +167,7 @@ Use the parameter `--target` as "multi" for multi-classification, else "binary".
 
 `--selection-metric` is a string describing which metric ("AIC", "f1_score" or "accuracy") to use on the validation set for tuning if `--tune-n-components` is true, else it's calculated once since the number of components is fixed (by default "AIC").
 
-    python3 -m luigi --module pipeline FullDatasetSupervisedGMM --dataset-name "CIC-IDS2017" --attack-only false --train-percentage 100 --max-components 3 --covariance-type "full" --reg-covar 1e-6 --tune-n-components false --selection-metric "AIC" --local-scheduler
+    python3 -m luigi --module pipeline FullDatasetSupervisedGMM --dataset-name "CIC-IDS2017" --attack-only true --train-percentage 100 --max-components 3 --covariance-type "full" --reg-covar 1e-6 --tune-n-components false --selection-metric "AIC" --local-scheduler
 
 ###### Continual Learning Supervised GMM
 
