@@ -232,3 +232,9 @@ This is the final system made of two modules: BNN for binary classification, the
 It is based on the experiments **Continual Learning Bayesian Neural Network** and **Continual Learning Supervised GMM**.
 
     python3 -m luigi --module pipeline ContinualBNNPlusGMM --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --lam 1.0 --permute-tasks false --covariance-type "full" --reg-covar 1e-6 --n-components 3 --local-scheduler
+
+###### Full-Dataset Neural Network Multi
+
+Multi version, which uses both benign and attack data.
+
+    python3 -m luigi --module pipeline FullDatasetNNMulticlass --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --local-scheduler
