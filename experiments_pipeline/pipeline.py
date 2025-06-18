@@ -44,6 +44,7 @@ cfg = {
     'models_folder': config.get('ExperimentsPipeline', 'models_folder'),
     'metrics_rel_filename': config.get('ExperimentsPipeline', 'metrics_rel_filename'),
     'nn_metrics_rel_filename': config.get('ExperimentsPipeline', 'nn_metrics_rel_filename'),
+    'nn_multi_metrics_rel_filename': config.get('ExperimentsPipeline', 'nn_multi_metrics_rel_filename'),
     'continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'continual_metrics_rel_filename'),
     'bnn_continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'bnn_continual_metrics_rel_filename'),
     'bayesian_continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'bayesian_continual_metrics_rel_filename'),
@@ -62,14 +63,14 @@ def get_full_model_rel_path(dataset_name, suffix):
 
 # Define fixed MLP architecture for BNN model
 class MLP(nn.Module):
-    def __init__(self, input_dim):
+    def __init__(self, input_dim, output_dim=2):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, 256),
             nn.GELU(),
             nn.Linear(256, 64),
             nn.GELU(),
-            nn.Linear(64, 2) # Laplace doesn't support BCE loss, we use CrossEntropyLoss with softmax
+            nn.Linear(64, output_dim)  # Generalized output layer
         )
 
     def forward(self, x):
@@ -1851,3 +1852,119 @@ class ContinualBNNPlusGMM(luigi.Task):
             df.to_csv(f, mode='a', header=f.tell() == 0, index=False, lineterminator='\n')
         logger.info(f"Saved metrics to {csv_path}")
         logger.info(f"Finished task {self.__class__.__name__}")
+
+
+class FullDatasetNNMulticlass(luigi.Task):
+    """
+    Full-dataset multi-class classification using a NN (including benign)
+    """
+
+    dataset_name = luigi.Parameter()
+    batch_size = luigi.IntParameter(default=128)
+    learning_rate = luigi.FloatParameter(default=0.001)
+
+    def requires(self):
+        class FakeTask(luigi.Task):
+            def output(_):
+                return DirectoryTarget(get_full_dataset_rel_path(self.dataset_name,
+                                                                 cfg['split_closed_set_rel_folder']))
+        return FakeTask()
+
+    def run(self):
+        logger.info(f'Started task {self.__class__.__name__}')
+        logger.info(f'batch_size={self.batch_size}, learning_rate={self.learning_rate}')
+
+        torch.manual_seed(np.random.default_rng().integers(0, 2**32 - 1))
+
+        # Load datasets
+        path = self.input().path
+        train_df = pd.read_csv(os.path.join(path, 'train.csv'))
+        test_df = pd.read_csv(os.path.join(path, 'test.csv'))
+
+        # Features and labels
+        X_train = train_df.drop(columns=["attack", "attack_type"])
+        X_test = test_df.drop(columns=["attack", "attack_type"])
+
+        y_train = train_df["attack_type"]
+        y_test = test_df["attack_type"]
+
+        # Encode class labels
+        class_labels = sorted(y_train.unique())
+        class_map = {label: idx for idx, label in enumerate(class_labels)}
+        y_train = y_train.map(class_map).values
+        y_test = y_test.map(class_map).values
+        num_classes = len(class_map)
+
+        logger.info(f'Mapped attack types to class indices: {class_map}')
+
+        # Normalization
+        numeric_cols = list(X_train.select_dtypes(include=['float', 'int']).columns)
+        mean, std = X_train[numeric_cols].mean(), X_train[numeric_cols].std()
+        for df in [X_train, X_test]:
+            df[numeric_cols] = (df[numeric_cols] - mean) / std
+
+        # Torch tensors
+        X_train_t = torch.tensor(X_train.values.astype(np.float32))
+        X_test_t = torch.tensor(X_test.values.astype(np.float32))
+        y_train_t = torch.tensor(y_train, dtype=torch.long)
+
+        train_loader = DataLoader(TensorDataset(X_train_t, y_train_t), batch_size=self.batch_size, shuffle=True)
+
+        # Model
+        model = MLP(X_train_t.shape[1], output_dim=num_classes)
+        optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
+        loss_fn = nn.CrossEntropyLoss()
+
+        # Training
+        for epoch in range(10):
+            model.train()
+            correct, total, total_loss = 0, 0, 0.0
+            for xb, yb in train_loader:
+                optimizer.zero_grad()
+                out = model(xb)
+                loss = loss_fn(out, yb)
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item() * xb.size(0)
+                correct += (out.argmax(dim=1) == yb).sum().item()
+                total += yb.size(0)
+            logger.info(f'Epoch {epoch+1} | Train Loss: {total_loss/total:.4f} | Train Acc: {correct/total:.4f}')
+
+        # Evaluation
+        model.eval()
+        with torch.no_grad():
+            probs = torch.softmax(model(X_test_t), dim=1).numpy()
+            y_pred = np.argmax(probs, axis=1)
+
+        # Metrics
+        accuracy = accuracy_score(y_test, y_pred)
+        precision = precision_score(y_test, y_pred, average="macro", zero_division=0)
+        recall = recall_score(y_test, y_pred, average="macro", zero_division=0)
+        f1 = f1_score(y_test, y_pred, average="macro", zero_division=0)
+        f1_weighted = f1_score(y_test, y_pred, average="weighted", zero_division=0)
+
+        logger.info(f'-> Accuracy: {accuracy}')
+        logger.info(f'-> Precision: {precision}')
+        logger.info(f'-> Recall: {recall}')
+        logger.info(f'-> F1 (Macro): {f1}')
+        logger.info(f'-> F1 (Weighted): {f1_weighted}')
+
+        # Save model and metrics
+        metrics_csv = get_full_model_rel_path(self.dataset_name, cfg['nn_multi_metrics_rel_filename'])
+        os.makedirs(os.path.dirname(metrics_csv), exist_ok=True)
+
+        metrics_df = pd.DataFrame([{
+            "dataset": self.dataset_name,
+            "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
+            "f1_macro": f1,
+            "f1_weighted": f1_weighted,
+            "batch_size": self.batch_size,
+            "learning_rate": self.learning_rate
+        }])
+        with open(metrics_csv, 'a') as f:
+            metrics_df.to_csv(f, mode='a', header=f.tell() == 0, index=False, lineterminator='\n')
+
+        logger.info(f'Saved the metrics to {metrics_csv}')
+        logger.info(f'Finished task {self.__class__.__name__}')
