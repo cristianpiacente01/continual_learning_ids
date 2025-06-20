@@ -238,3 +238,9 @@ It is based on the experiments **Continual Learning Bayesian Neural Network** an
 Multi version, which uses both benign and attack data.
 
     python3 -m luigi --module pipeline FullDatasetNNMulticlass --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --local-scheduler
+
+###### FINAL SYSTEM FULL NORMALIZATION - Continual Learning BNN + GMM
+
+Like the final system but normalization is performed using mean and std calculated on the whole training set, for comparison purposes.
+
+    python3 -m luigi --module pipeline ContinualBNNPlusGMMFullNorm --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --lam 1.0 --permute-tasks false --covariance-type "full" --reg-covar 1e-6 --n-components 3 --local-scheduler
