@@ -50,6 +50,7 @@ cfg = {
     'bayesian_continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'bayesian_continual_metrics_rel_filename'),
     'bnn_gmm_continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'bnn_gmm_continual_metrics_rel_filename'),
     'full_norm_bnn_gmm_continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'full_norm_bnn_gmm_continual_metrics_rel_filename'),
+    'ood_bnn_continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'ood_bnn_continual_metrics_rel_filename'),
 }
 
 # Retrieve a relative path w.r.t the dataset name in the datasets folder
@@ -2232,3 +2233,322 @@ class ContinualBNNPlusGMMFullNorm(luigi.Task):
             df.to_csv(f, mode='a', header=f.tell() == 0, index=False, lineterminator='\n')
         logger.info(f"Saved metrics to {csv_path}")
         logger.info(f"Finished task {self.__class__.__name__}")
+
+
+class ContinualBNNWithOOD(luigi.Task):
+    """
+    Continual Learning Binary Classification using BNN with Laplace approximation (Laplace Redux).
+    Each task introduces a new attack type, but model predicts only binary: benign (0) vs attack (1).
+    Posterior from previous task is used as prior regularizer during current training.
+
+    OoD evaluation is performed at the end, after the last task.
+    """
+
+    dataset_name = luigi.Parameter()
+
+    # Batch size
+    batch_size = luigi.IntParameter(default=128)
+
+    # Learning rate 
+    learning_rate = luigi.FloatParameter(default=0.001)
+
+    # Regularization strength
+    lam = luigi.FloatParameter(default=1.0)
+
+    # Flag to decide whether to permute tasks or not
+    permute_tasks = luigi.BoolParameter(default=False, parsing=luigi.BoolParameter.EXPLICIT_PARSING)
+
+    def requires(self):
+        # The "split-dataset" (val.csv and test.csv), "tasks" folders and ood.csv are needed
+        class FakeTask(luigi.Task):
+            def output(_):
+                return {'split-dataset': DirectoryTarget(get_full_dataset_rel_path(self.dataset_name, 
+                                                                 cfg['split_closed_set_rel_folder'])),
+                        'tasks': DirectoryTarget(get_full_dataset_rel_path(self.dataset_name, 
+                                                                           cfg['tasks_rel_folder'])),
+                        'ood': luigi.LocalTarget(get_full_dataset_rel_path(self.dataset_name,
+                                                                         cfg['ood_rel_filename']))}
+            
+        return FakeTask()
+
+
+    def run(self):
+        logger.info(f'Started task {self.__class__.__name__}')
+
+        logger.info(f'====== PARAMETERS (DATASET {self.dataset_name}) ======')
+        logger.info(f'batch_size={self.batch_size}')
+        logger.info(f'learning_rate={self.learning_rate}')
+        logger.info(f'lam={self.lam}')
+        logger.info(f'permute_tasks={self.permute_tasks}')
+        logger.info('========================')
+
+        split_path = self.input()['split-dataset'].path
+        tasks_path = self.input()['tasks'].path
+
+        # Retrieve val.csv and test.csv from the split-dataset folder, then the csv files from the tasks folder
+        val_df = pd.read_csv(os.path.join(split_path, 'val.csv'))
+        test_df = pd.read_csv(os.path.join(split_path, 'test.csv'))
+        task_files = sorted(glob.glob(os.path.join(tasks_path, 'task_*.csv')))
+        if self.permute_tasks:
+            random.shuffle(task_files)
+
+        # Retrieve ood.csv
+        ood_df = pd.read_csv(self.input()['ood'].path)
+        X_ood = ood_df.drop(columns=["attack", "attack_type"])
+        y_ood = ood_df["attack"].astype(int).values
+
+        model = None           # Shared model across tasks
+        laplace = None         # Stores Laplace posterior from previous task
+        metrics = []           # Collect evaluation metrics
+        seen_attacks = []      # Track cumulative test attacks
+
+        # Reuse first task stats for normalization (as per CL setup)
+        first_task_mean = None
+        first_task_std = None  
+
+        # === MAIN CONTINUAL LEARNING LOOP (one task = one attack) ===
+        for i, task_file in enumerate(task_files):
+            task_df = pd.read_csv(task_file)
+
+            # --- Get current attack class ---
+            current_attacks = set(task_df["attack_type"].unique()) - {"benign", "Benign", "normal", "Normal"} 
+            assert len(current_attacks) == 1, f"Task file {task_file} must contain exactly 1 attack type"
+            current_attack = current_attacks.pop()
+            seen_attacks.append(current_attack)
+
+            # Train = benign + current attack
+            X_train = task_df.drop(columns=["attack", "attack_type"])
+            y_train = task_df['attack'].astype(int).values
+
+            # Val = benign + current attack
+            val_task_df = val_df[val_df['attack_type'].isin([current_attack, 'Benign', 'benign', 'normal', 'Normal'])]
+            X_val = val_task_df.drop(columns=["attack", "attack_type"])
+            y_val = val_task_df['attack'].astype(int).values
+
+            # Test = benign + all seen attack types (label = 1), benign = 0
+            test_seen_df = test_df[test_df['attack_type'].isin(seen_attacks + ['benign', 'Benign', 'normal', 'Normal'])]
+            X_test = test_seen_df.drop(columns=["attack", "attack_type"])
+            y_test = test_seen_df['attack'].astype(int).values
+
+            # For tracking test metrics on the current task and previous tasks
+            test_current_df = test_df[test_df['attack_type'].isin([current_attack, "benign", "Benign", "normal", "Normal"])]
+            test_previous_df = test_df[test_df['attack_type'].isin(seen_attacks[:-1] + ["benign", "Benign", "normal", "Normal"])] \
+                                if i > 0 else None
+
+            # Identify columns to normalize: numeric columns, keep also constant ones since they may change among different tasks!
+            columns_to_normalize = [numeric_column
+                                    for numeric_column in list(X_train.select_dtypes(include=['float', 'int']).columns)]
+            
+            # Retrieve mean and std if it's the first task
+            if first_task_mean is None:
+                first_task_mean = X_train[columns_to_normalize].mean()
+                first_task_std = X_train[columns_to_normalize].std()
+
+            # --- Z-SCORE NORMALIZATION USING MEAN & STD FROM 1st TASK ---
+            for df in [X_train, X_val, X_test, test_current_df, test_previous_df, ood_df]:
+                if df is None or df.empty:
+                    continue
+                for col in columns_to_normalize:
+                    mean = first_task_mean[col]
+                    std = first_task_std[col]
+                    # Avoid NaN or something that isn't ok
+                    if pd.isna(mean) or mean < 1e-8 or pd.isna(std) or std < 1e-8:
+                        df[col] = 0.0
+                    else:
+                        df[col] = (df[col] - mean) / std
+
+            # --- Convert to Torch tensors ---
+            X_train_t = torch.tensor(X_train.values.astype(np.float32))
+            X_val_t = torch.tensor(X_val.values.astype(np.float32))
+            X_test_t = torch.tensor(X_test.values.astype(np.float32))
+            y_train_t = torch.tensor(y_train, dtype=torch.long)
+            y_val_t = torch.tensor(y_val, dtype=torch.long)
+            y_test_t = torch.tensor(y_test, dtype=torch.long)
+
+            train_loader = DataLoader(TensorDataset(X_train_t, y_train_t), batch_size=self.batch_size, shuffle=True)
+            val_loader = DataLoader(TensorDataset(X_val_t, y_val_t), batch_size=self.batch_size, shuffle=True)
+
+            # === MODEL INITIALIZATION (first task only) ===
+            if model is None:
+                model = MLP(X_train_t.shape[1])
+
+            optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
+            loss_fn = nn.CrossEntropyLoss()
+
+            # === TRAINING LOOP ===
+            for epoch in range(10):
+                model.train()
+                running_loss = 0
+                correct_train = 0
+                total_train = 0
+
+                for xb, yb in train_loader:
+                    optimizer.zero_grad()
+                    out = model(xb)
+                    loss = loss_fn(out, yb)
+
+                    # Add Laplace Redux regularization from previous posterior
+                    if laplace is not None:
+                        theta = parameters_to_vector(model.parameters())
+                        log_prior = laplace.log_prob(theta) / len(xb)  # divide by batch size
+                        loss = loss - self.lam * log_prior
+
+                    loss.backward()
+                    optimizer.step()
+                    running_loss += loss.item() * xb.size(0)
+
+                    pred = out.argmax(dim=1)
+                    correct_train += (pred == yb).sum().item()
+                    total_train += yb.size(0)
+
+                avg_train_loss = running_loss / total_train
+                train_acc = correct_train / total_train
+
+                # === Validation accuracy (no Laplace) ===
+                model.eval()
+                correct_val = 0
+                total_val = 0
+                val_loss = 0
+
+                with torch.no_grad():
+                    for xb, yb in val_loader:
+                        out = model(xb)
+                        loss = loss_fn(out, yb)
+                        val_loss += loss.item() * xb.size(0)
+                        pred = out.argmax(dim=1)
+                        correct_val += (pred == yb).sum().item()
+                        total_val += yb.size(0)
+
+                avg_val_loss = val_loss / total_val
+                val_acc = correct_val / total_val
+                logger.info(f'[TASK {i + 1}] Epoch {epoch+1} | Train Loss: {avg_train_loss:.4f} | Train Acc: {train_acc:.4f} | Val Loss: {avg_val_loss:.4f} | Val Acc: {val_acc:.4f}')
+
+            # === FIT LAPLACE REDUX ===
+            logger.info(f'[TASK {i + 1}] Training completed. Fitting Laplace approximation...')
+            laplace = Laplace(model, 'classification', subset_of_weights='all', hessian_structure='kron', backend=AsdlGGN)
+            laplace.fit(train_loader)
+            laplace.prior_mean = laplace.mean.clone()
+            laplace.optimize_prior_precision(init_prior_prec=laplace.prior_precision)
+            logger.info(f'[TASK {i + 1}] Laplace fitted')
+
+            # === POSTERIOR-BASED VALIDATION & TEST ===
+            logits_val_list = []
+            with torch.no_grad():
+                for xb, _ in val_loader:
+                    logits_batch = model(xb).detach()
+                    logits_val_list.append(logits_batch)
+
+            logits_val = torch.cat(logits_val_list, dim=0)
+            probs_val = torch.softmax(logits_val, dim=1).numpy()
+            y_pred_val = np.argmax(probs_val, axis=1)
+            val_acc_post_laplace = accuracy_score(y_val, y_pred_val)
+            logger.info(f'Validation accuracy: {val_acc_post_laplace:.4f}')
+
+            # === TEST EVALUATIONS - HELPER FUNCTION ===
+            def eval_metrics(loader, y, label):
+                logits_list = []
+                with torch.no_grad():
+                    for xb, _ in loader:
+                        logits_batch = model(xb).detach()
+                        logits_list.append(logits_batch)
+            
+                logits = torch.cat(logits_list, dim=0)
+                probs = torch.softmax(logits, dim=1).numpy()
+                y_pred = np.argmax(probs, axis=1)
+                acc = accuracy_score(y, y_pred)
+                logger.info(f'[TASK {i+1}] {label} accuracy: {acc:.4f}')
+                return {
+                    'accuracy': acc,
+                    'f1_macro': f1_score(y, y_pred, average="macro", zero_division=0),
+                    'f1_weighted': f1_score(y, y_pred, average="weighted", zero_division=0),
+                    'roc_auc': roc_auc_score(y, probs[:, 1])
+                }
+            
+            # Test data loaders
+            test_loader_all = DataLoader(TensorDataset(X_test_t, y_test_t), batch_size=self.batch_size)
+            test_loader_current = DataLoader(TensorDataset(
+                torch.tensor(test_current_df.drop(columns=["attack", "attack_type"]).values.astype(np.float32)),
+                torch.tensor(test_current_df['attack'].astype(int).values)
+            ), batch_size=self.batch_size)
+
+            test_loader_prev = None
+            if i > 0:
+                test_loader_prev = DataLoader(TensorDataset(
+                    torch.tensor(test_previous_df.drop(columns=["attack", "attack_type"]).values.astype(np.float32)),
+                    torch.tensor(test_previous_df['attack'].astype(int).values)
+                ), batch_size=self.batch_size)
+
+            # Cumulative, current and previous tasks metrics
+            metrics_cumulative = eval_metrics(test_loader_all, y_test, 'CUMULATIVE')
+            metrics_current = eval_metrics(test_loader_current, test_current_df['attack'].astype(int).values, 'CURRENT')
+            metrics_previous = {metric: None for metric in ['accuracy', 'f1_macro', 'f1_weighted', 'roc_auc']} if i == 0 \
+                         else eval_metrics(test_loader_prev, test_previous_df['attack'].astype(int).values, 'PREVIOUS')
+
+            logger.info(f'Task {i + 1} -> Accuracy: {metrics_cumulative["accuracy"]:.4f} | F1 (Macro): {metrics_cumulative["f1_macro"]:.4f} | F1 (Weighted): {metrics_cumulative["f1_weighted"]:.4f}')
+
+            metrics.append({
+                'dataset': self.dataset_name,
+                'learning_rate': self.learning_rate,
+                'batch_size': self.batch_size,
+                'lambda': self.lam,
+                'permute_tasks': self.permute_tasks,
+                'task': i + 1,
+                'attack': current_attack,
+                **{f'cumulative_{k}': v for k, v in metrics_cumulative.items()},
+                **{f'current_{k}': v for k, v in metrics_current.items()},
+                **{f'previous_{k}': v for k, v in metrics_previous.items()}
+            })
+
+        # --- OoD ---
+        X_ood_t = torch.tensor(X_ood.values.astype(np.float32))
+        y_ood_t = torch.tensor(y_ood, dtype=torch.long)
+        ood_loader = DataLoader(TensorDataset(X_ood_t, y_ood_t), batch_size=self.batch_size)
+        ood_logits = torch.cat([model(xb).detach() for xb, _ in ood_loader], dim=0)
+        ood_probs = torch.softmax(ood_logits, dim=1).numpy()
+        y_pred_ood = np.argmax(ood_probs, axis=1)
+        metrics.append({
+            'dataset': f"{self.dataset_name}_OoD",
+            'learning_rate': self.learning_rate,
+            'batch_size': self.batch_size,
+            'lambda': self.lam,
+            'permute_tasks': self.permute_tasks,
+            'task': -1,
+            'attack': None,
+            'cumulative_accuracy': None,
+            'cumulative_f1_macro': None,
+            'cumulative_f1_weighted': None,
+            'cumulative_roc_auc': None,
+            'current_accuracy': accuracy_score(y_ood, y_pred_ood),
+            'current_f1_macro': f1_score(y_ood, y_pred_ood, average="macro", zero_division=0),
+            'current_f1_weighted': f1_score(y_ood, y_pred_ood, average="weighted", zero_division=0),
+            'current_roc_auc': roc_auc_score(y_ood, ood_probs[:, 1]),
+            'previous_accuracy': None,
+            'previous_f1_macro': None,
+            'previous_f1_weighted': None,
+            'previous_roc_auc': None
+        })
+
+        logger.info('Performed OoD Evaluation')
+        
+
+        # --- SAVE MODEL AND METRICS ---
+        model_folder = get_full_model_rel_path(self.dataset_name, '')
+        model_file = os.path.join(model_folder, 'Continual_Learning_BNN_weights.pt')
+        continual_metrics_csv = get_full_model_rel_path(self.dataset_name, cfg['ood_bnn_continual_metrics_rel_filename'])
+
+        # Create the folders if they don't exist
+        os.makedirs(os.path.dirname(continual_metrics_csv), exist_ok=True)
+
+        # Save model weights
+        torch.save(model.state_dict(), model_file)
+
+        # Save metrics to CSV
+        metrics_df = pd.DataFrame(metrics)
+        logger.info('Metrics:')
+        logger.info(f'\n{metrics_df}')
+
+        with open(continual_metrics_csv, 'a') as f:
+            metrics_df.to_csv(f, mode='a', header=f.tell() == 0, index=False, lineterminator='\n')
+
+        logger.info(f'Saved the metrics to {continual_metrics_csv}')
+        logger.info(f'Finished task {self.__class__.__name__}')

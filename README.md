@@ -86,14 +86,14 @@ To quit the virtual environment, it's sufficient to execute the command
 - the dataset name (used for identifying the datasets folder + creating one in the models folder)
 - hyperparameters for tuning (see examples in the sections below)
 
-**Steps (TODO)**:
+**Steps**:
 
 6. 
     a. Baseline modeling and evaluation on the full Closed-Set (i.e., use the split dataset from 3.) \
     b. Modeling on each task from train (simulate a real-time data stream), without catastrophic forgetting: \
         - Incrementally train (without storing the previous data) \
         - Evaluate on the validation set and predict on the test set (Continual Learning while checking the ability of retaining past knowledge)
-7. (TODO) Use the OoD data for testing generalization capabilities
+7. Use the OoD data for testing generalization capabilities
 
 
 #### Execution
@@ -244,3 +244,9 @@ Multi version, which uses both benign and attack data.
 Like the final system but normalization is performed using mean and std calculated on the whole training set, for comparison purposes.
 
     python3 -m luigi --module pipeline ContinualBNNPlusGMMFullNorm --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --lam 1.0 --permute-tasks false --covariance-type "full" --reg-covar 1e-6 --n-components 3 --local-scheduler
+
+###### Continual Learning Bayesian Neural Network WITH OoD (MLP, Laplace approximation)
+
+Like Continual BNN but with OoD evaluation after the last task.
+
+    python3 -m luigi --module pipeline ContinualBNNWithOOD --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --lam 1.0 --permute-tasks false --local-scheduler
