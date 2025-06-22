@@ -1839,7 +1839,7 @@ class ContinualBNNPlusGMM(luigi.Task):
 
             # === Save metrics for task ===
             metrics.append({
-                "dataset": self.dataset_name,
+                "dataset": f"{self.dataset_name}_{self.train_percentage}%",
                 "task": i + 1,
                 "attack": current_attack,
                 "lambda": self.lam,
