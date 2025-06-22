@@ -1626,6 +1626,8 @@ class ContinualBNNPlusGMM(luigi.Task):
 
     n_components = luigi.IntParameter(default=3)
 
+    train_percentage = luigi.IntParameter(default=100)
+
     def requires(self):
         # The "split-dataset" (test.csv) and "tasks" folders are needed
         class FakeTask(luigi.Task):
@@ -1648,6 +1650,7 @@ class ContinualBNNPlusGMM(luigi.Task):
         logger.info(f'covariance_type={self.covariance_type}')
         logger.info(f'reg_covar={self.reg_covar}')
         logger.info(f'n_components={self.n_components}')
+        logger.info(f'train_percentage={self.train_percentage}')
         logger.info('========================')
 
         # === Load data and task files ===
@@ -1730,6 +1733,14 @@ class ContinualBNNPlusGMM(luigi.Task):
                 next_class_idx += 1
 
             # === Prepare training data ===
+            if 0 < self.train_percentage < 100:
+                task_df, _ = train_test_split(
+                    task_df,
+                    train_size=self.train_percentage / 100,
+                    stratify=task_df["attack"],
+                    random_state=42
+                )
+                logger.info(f'Using only {self.train_percentage}% of training data for task {i+1}: {len(task_df)} samples')
             X_train_df = task_df.drop(columns=["attack", "attack_type"])
             y_train_bin = task_df["attack"].astype(int).values
             y_train_cls = np.full(len(X_train_df), class_idx_map[current_attack])
@@ -1828,7 +1839,7 @@ class ContinualBNNPlusGMM(luigi.Task):
 
             # === Save metrics for task ===
             metrics.append({
-                "dataset": self.dataset_name,
+                "dataset": f"{self.dataset_name}_{self.train_percentage}%",
                 "task": i + 1,
                 "attack": current_attack,
                 "lambda": self.lam,
