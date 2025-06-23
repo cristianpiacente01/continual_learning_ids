@@ -2345,7 +2345,7 @@ class ContinualBNNWithOOD(luigi.Task):
                 first_task_std = X_train[columns_to_normalize].std()
 
             # --- Z-SCORE NORMALIZATION USING MEAN & STD FROM 1st TASK ---
-            for df in [X_train, X_val, X_test, test_current_df, test_previous_df, X_ood]:
+            for df in [X_train, X_val, X_test, test_current_df, test_previous_df]:
                 if df is None or df.empty:
                     continue
                 for col in columns_to_normalize:
@@ -2499,7 +2499,15 @@ class ContinualBNNWithOOD(luigi.Task):
                 **{f'previous_{k}': v for k, v in metrics_previous.items()}
             })
 
-        # --- OoD ---
+        # --- OoD, normalize then use it ---
+        for col in [numeric_column for numeric_column in list(X_ood.select_dtypes(include=['float', 'int']).columns)]:
+            mean = first_task_mean[col]
+            std = first_task_std[col]
+            # Avoid NaN or something that isn't ok
+            if pd.isna(mean) or mean < 1e-8 or pd.isna(std) or std < 1e-8:
+                X_ood[col] = 0.0
+            else:
+                X_ood[col] = (X_ood[col] - mean) / std
         X_ood_t = torch.tensor(X_ood.values.astype(np.float32))
         y_ood_t = torch.tensor(y_ood, dtype=torch.long)
         ood_loader = DataLoader(TensorDataset(X_ood_t, y_ood_t), batch_size=self.batch_size)
@@ -2521,7 +2529,7 @@ class ContinualBNNWithOOD(luigi.Task):
             'current_accuracy': accuracy_score(y_ood, y_pred_ood),
             'current_f1_macro': f1_score(y_ood, y_pred_ood, average="macro", zero_division=0),
             'current_f1_weighted': f1_score(y_ood, y_pred_ood, average="weighted", zero_division=0),
-            'current_roc_auc': roc_auc_score(y_ood, ood_probs[:, 1]),
+            'current_roc_auc': None,
             'previous_accuracy': None,
             'previous_f1_macro': None,
             'previous_f1_weighted': None,
