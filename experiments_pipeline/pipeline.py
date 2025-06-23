@@ -19,6 +19,7 @@ from sklearn.mixture import BayesianGaussianMixture
 from sklearn.decomposition import TruncatedSVD
 import random
 from laplace.curvature.asdl import AsdlGGN
+from copy import deepcopy
 
 # Fix logging for Python 3.12.0
 logging.root.handlers.clear()
@@ -51,6 +52,7 @@ cfg = {
     'bnn_gmm_continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'bnn_gmm_continual_metrics_rel_filename'),
     'full_norm_bnn_gmm_continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'full_norm_bnn_gmm_continual_metrics_rel_filename'),
     'ood_bnn_continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'ood_bnn_continual_metrics_rel_filename'),
+    'lwf_metrics_rel_filename': config.get('ExperimentsPipeline', 'lwf_metrics_rel_filename'),
 }
 
 # Retrieve a relative path w.r.t the dataset name in the datasets folder
@@ -2560,3 +2562,160 @@ class ContinualBNNWithOOD(luigi.Task):
 
         logger.info(f'Saved the metrics to {continual_metrics_csv}')
         logger.info(f'Finished task {self.__class__.__name__}')
+
+
+class ContinualLwF(luigi.Task):
+    """
+    State of the art: Learning without Forgetting
+    """
+
+    dataset_name = luigi.Parameter()
+
+    batch_size = luigi.IntParameter(default=128)
+
+    learning_rate = luigi.FloatParameter(default=0.001)
+
+    lam = luigi.FloatParameter(default=1.0)
+
+    temperature = luigi.FloatParameter(default=2.0)
+
+    permute_tasks = luigi.BoolParameter(default=False, parsing=luigi.BoolParameter.EXPLICIT_PARSING)
+
+    def requires(self):
+        class FakeTask(luigi.Task):
+            def output(_):
+                return {
+                    'split-dataset': DirectoryTarget(get_full_dataset_rel_path(self.dataset_name, 
+                                                                               cfg['split_closed_set_rel_folder'])),
+                    'tasks': DirectoryTarget(get_full_dataset_rel_path(self.dataset_name, 
+                                                                       cfg['tasks_rel_folder']))
+                }
+        return FakeTask()
+
+    def run(self):
+        logger.info(f"Started task {self.__class__.__name__}")
+
+        split_path = self.input()['split-dataset'].path
+        tasks_path = self.input()['tasks'].path
+        test_df = pd.read_csv(os.path.join(split_path, "test.csv"))
+        task_files = sorted(glob.glob(os.path.join(tasks_path, "task_*.csv")))
+        if self.permute_tasks:
+            random.shuffle(task_files)
+
+        class_map = {}  # benign is always class 0
+        next_cls_idx = 1
+        metrics = []
+        seen_attacks = []
+        model = None
+        prev_model = None
+        input_dim = None
+        first_task_mean, first_task_std = None, None
+
+        def is_benign(attack_type):
+            return str(attack_type).strip().lower() in {"benign", "normal"}
+
+        def normalize(df):
+            for col in columns_to_normalize:
+                mean = first_task_mean[col]
+                std = first_task_std[col]
+                if pd.isna(mean) or pd.isna(std) or std < 1e-8:
+                    df[col] = 0.0
+                else:
+                    df[col] = (df[col] - mean) / std
+            return df
+
+        for i, task_file in enumerate(task_files):
+            logger.info(f"===== TASK {i+1} =====")
+            df = pd.read_csv(task_file)
+
+            current_attacks = set(a for a in df["attack_type"].unique() if not is_benign(a))
+            assert len(current_attacks) == 1
+            current_attack = current_attacks.pop()
+            seen_attacks.append(current_attack)
+
+            if current_attack not in class_map:
+                class_map[current_attack] = next_cls_idx
+                next_cls_idx += 1
+
+            X_df = df.drop(columns=['attack', 'attack_type']).copy()
+            y_cls = df['attack_type'].apply(lambda x: 0 if is_benign(x) else class_map[x]).values
+
+            columns_to_normalize = list(X_df.select_dtypes(include=["float", "int"]).columns)
+            if first_task_mean is None:
+                first_task_mean = X_df.mean()
+                first_task_std = X_df.std()
+            X_df = normalize(X_df)
+
+            X_np = X_df.values.astype(np.float32)
+            y_torch = torch.tensor(y_cls, dtype=torch.long)
+
+            if input_dim is None:
+                input_dim = X_np.shape[1]
+
+            if model is None:
+                model = MLP(input_dim, output_dim=next_cls_idx)
+            else:
+                prev_model = deepcopy(model)
+                prev_model.eval()
+                model = MLP(input_dim, output_dim=next_cls_idx)
+                prev_state = prev_model.state_dict()
+                model_state = model.state_dict()
+                compatible_weights = {k: v for k, v in prev_state.items() if k in model_state and v.shape == model_state[k].shape}
+                model_state.update(compatible_weights)
+                model.load_state_dict(model_state)
+
+            dataset = TensorDataset(torch.tensor(X_np), y_torch)
+            loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+
+            opt = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
+            ce_loss = nn.CrossEntropyLoss()
+            softmax = nn.Softmax(dim=1)
+            kl_loss = nn.KLDivLoss(reduction='batchmean')
+
+            for _ in range(10):
+                model.train()
+                for xb, yb in loader:
+                    opt.zero_grad()
+                    logits = model(xb)
+                    loss = ce_loss(logits, yb)
+                    if prev_model is not None:
+                        with torch.no_grad():
+                            logits_old = prev_model(xb) / self.temperature
+                            probs_old = softmax(logits_old)
+                        logits_new_old = logits[:, :logits_old.shape[1]] / self.temperature
+                        log_probs_new = torch.log_softmax(logits_new_old, dim=1)
+                        distill = kl_loss(log_probs_new, probs_old) * (self.temperature ** 2)
+                        loss += self.lam * distill
+                    loss.backward()
+                    opt.step()
+
+            # === Evaluation: cumulative ===
+            test_seen_df = test_df[test_df["attack_type"].apply(lambda x: x in seen_attacks or is_benign(x))].copy()
+            X_test_df = normalize(test_seen_df.drop(columns=["attack", "attack_type"]).copy())
+            X_test = torch.tensor(X_test_df.values.astype(np.float32))
+            y_true = test_seen_df["attack_type"].apply(lambda x: class_map.get(x) if not is_benign(x) else 0).values
+            with torch.no_grad():
+                preds = model(X_test).argmax(dim=1).numpy()
+            scores = {
+                'dataset': self.dataset_name,
+                'learning_rate': self.learning_rate,
+                'batch_size': self.batch_size,
+                'lambda': self.lam,
+                'temperature': self.temperature,
+                'permute_tasks': self.permute_tasks,
+                'task': i + 1,
+                'attack': current_attack,
+                "cumulative_accuracy": accuracy_score(y_true, preds),
+                "cumulative_f1_macro": f1_score(y_true, preds, average="macro", zero_division=0),
+                "cumulative_f1_weighted": f1_score(y_true, preds, average="weighted", zero_division=0)
+            }
+            metrics.append(scores)
+
+        # Save results
+        csv_path = get_full_model_rel_path(self.dataset_name, cfg["lwf_metrics_rel_filename"])
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        df = pd.DataFrame(metrics)
+        with open(csv_path, 'a') as f:
+            df.to_csv(f, mode='a', header=f.tell() == 0, index=False, lineterminator='\n')
+        logger.info(f"Saved metrics to {csv_path}")
+        logger.info(f"Finished task {self.__class__.__name__}")
