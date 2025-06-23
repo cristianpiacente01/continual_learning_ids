@@ -250,3 +250,11 @@ Like the final system but normalization is performed using mean and std calculat
 Like Continual BNN but with OoD evaluation after the last task.
 
     python3 -m luigi --module pipeline ContinualBNNWithOOD --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --lam 1.0 --permute-tasks false --local-scheduler
+
+###### STATE OF THE ART - LEARNING WITHOUT FORGETTING (MLP)
+
+Inspired by the paper "Learning without Forgetting" as the state of the art.
+
+`--temperature` is the non-negative temperature used for smoothing predictions (by default 2.0, doesn't make a difference to make it higher).
+
+    python3 -m luigi --module pipeline ContinualLwF --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --lam 1.0 --temperature 2.0 --permute-tasks false --local-scheduler
