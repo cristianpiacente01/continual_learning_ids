@@ -2345,7 +2345,7 @@ class ContinualBNNWithOOD(luigi.Task):
                 first_task_std = X_train[columns_to_normalize].std()
 
             # --- Z-SCORE NORMALIZATION USING MEAN & STD FROM 1st TASK ---
-            for df in [X_train, X_val, X_test, test_current_df, test_previous_df, ood_df]:
+            for df in [X_train, X_val, X_test, test_current_df, test_previous_df, X_ood]:
                 if df is None or df.empty:
                     continue
                 for col in columns_to_normalize:
