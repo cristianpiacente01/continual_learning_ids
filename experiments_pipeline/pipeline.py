@@ -7,7 +7,7 @@ import glob
 from sklearn.mixture import GaussianMixture
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import ParameterSampler
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, classification_report
 import pickle
 from sklearn.model_selection import train_test_split
 import torch
@@ -1685,12 +1685,25 @@ class ContinualBNNPlusGMM(luigi.Task):
                 df[col] = 0.0 if pd.isna(mean) or pd.isna(std) or std < 1e-8 else (df[col] - mean) / std
             return df
 
-        def predict_system(X_np, y_true_cls=None):  # y_true_cls is for debug
+        def predict_system(X_np, y_true_cls, classification_threshold=0.5):  # y_true_cls is for debug
+
+            # PARAMETRIC DEFAULT VALUE FOR CLASSIFICATION THRESHOLD TO IMPROVE PERFORMANCE
+            # CIC-IDS2017 --> 0.1
+            # CSE-CIC-IDS2018 --> 0.3
+
+            if classification_threshold == 0.5:
+                if self.dataset_name == 'CIC-IDS2017':
+                    classification_threshold = 0.1
+                elif self.dataset_name == 'CSE-CIC-IDS2018':
+                    classification_threshold = 0.3
+            
+            logger.info(f"CLASSIFICATION THRESHOLD: {classification_threshold}")
+
             with torch.no_grad():
                 probs = torch.softmax(model(torch.tensor(X_np, dtype=torch.float32)), dim=1).detach().numpy()
 
             p_attack = probs[:, 1]
-            binary_preds = (p_attack > 0.5).astype(int)
+            binary_preds = (p_attack > classification_threshold).astype(int)
 
             if y_true_cls is not None:
                 true_attacks = (y_true_cls != 0)
@@ -1808,7 +1821,9 @@ class ContinualBNNPlusGMM(luigi.Task):
             test_seen_df = test_df[test_df["attack_type"].apply(lambda x: x in seen_attacks or is_benign(x))].copy()
             X_test_np = normalize(test_seen_df.drop(columns=["attack", "attack_type"])).values.astype(np.float32)
             y_true_cls = test_seen_df["attack_type"].apply(lambda x: class_idx_map.get(x) if not is_benign(x) else 0).values
+            logger.info('START EVALUATING CUMULATIVE TEST...')
             y_pred_cls = predict_system(X_test_np, y_true_cls)
+            logger.info('END EVALUATING CUMULATIVE TEST...')
 
             scores = {
                 "accuracy": accuracy_score(y_true_cls, y_pred_cls),
@@ -1857,6 +1872,8 @@ class ContinualBNNPlusGMM(luigi.Task):
                 **{f"current_{k}": scores_current[k] for k in scores_current},
                 **{f"previous_{k}": scores_previous[k] for k in scores_previous}
             })
+
+        logger.info(f"CLASSIFICATION REPORT: \n{classification_report(y_true_cls, y_pred_cls)}")
 
         # === Save all results ===
         csv_path = get_full_model_rel_path(self.dataset_name, cfg["bnn_gmm_continual_metrics_rel_filename"])
