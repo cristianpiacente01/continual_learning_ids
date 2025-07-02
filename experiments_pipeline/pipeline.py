@@ -7,7 +7,7 @@ import glob
 from sklearn.mixture import GaussianMixture
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import ParameterSampler
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, classification_report
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, classification_report, confusion_matrix
 import pickle
 from sklearn.model_selection import train_test_split
 import torch
@@ -460,6 +460,9 @@ class FullDatasetSupervisedGMM(luigi.Task):
         logger.info(f'-> Recall: {recall}')
         logger.info(f'-> F1-Score (Macro): {f1}')
         logger.info(f'-> F1-Score (Weighted): {f1_weighted}')
+
+        logger.info(f'[REMINDER] Mapped attack types to numerical labels: {attack_mapping}')
+        logger.info(f"CONFUSION MATRIX: \n{pd.DataFrame(confusion_matrix(y_test, y_test_pred, labels=sorted(attack_mapping.values())))}")
         
 
         ##### --- SAVE MODEL AND METRICS --- #####
@@ -1874,6 +1877,9 @@ class ContinualBNNPlusGMM(luigi.Task):
             })
 
         logger.info(f"CLASSIFICATION REPORT: \n{classification_report(y_true_cls, y_pred_cls)}")
+
+        logger.info(f'[REMINDER] Mapped attack types to numerical labels: {class_idx_map}')
+        logger.info(f"CONFUSION MATRIX: \n{pd.DataFrame(confusion_matrix(y_true_cls, y_pred_cls, labels=[label for label in range(0, next_class_idx)]))}")
 
         # === Save all results ===
         csv_path = get_full_model_rel_path(self.dataset_name, cfg["bnn_gmm_continual_metrics_rel_filename"])
