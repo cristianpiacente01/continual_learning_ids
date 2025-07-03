@@ -447,6 +447,12 @@ class FullDatasetSupervisedGMM(luigi.Task):
             log_likelihoods[:, class_idx] = gmm.score_samples(X_test)
         y_test_pred = np.argmax(log_likelihoods, axis=1)
 
+        def count_gmm_parameters(gmm, d):
+            K = gmm.n_components
+            return K * d + K * d * d + (K - 1)
+
+        logger.info(f'Total GMM parameters: {sum(count_gmm_parameters(gmm, X_train.shape[1]) for gmm in class_gmms.values())}')
+
         # Compute final test metrics
         accuracy = accuracy_score(y_test, y_test_pred)
         precision = precision_score(y_test, y_test_pred, average="macro")
@@ -1876,6 +1882,14 @@ class ContinualBNNPlusGMM(luigi.Task):
                 **{f"previous_{k}": scores_previous[k] for k in scores_previous}
             })
 
+        def count_gmm_parameters(gmm, d):
+            K = gmm.n_components
+            return K * d + K * d * d + (K - 1)
+
+        logger.info(f'Trainable NN parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}')
+        
+        logger.info(f'Total GMM parameters: {sum(count_gmm_parameters(gmm, X_train.shape[1]) for gmm in gmm_models.values())}')
+
         logger.info(f"CLASSIFICATION REPORT: \n{classification_report(y_true_cls, y_pred_cls)}")
 
         logger.info(f'[REMINDER] Mapped attack types to numerical labels: {class_idx_map}')
@@ -1952,6 +1966,8 @@ class FullDatasetNNMulticlass(luigi.Task):
         model = MLP(X_train_t.shape[1], output_dim=num_classes)
         optimizer = torch.optim.Adam(model.parameters(), lr=self.learning_rate)
         loss_fn = nn.CrossEntropyLoss()
+
+        logger.info(f'Trainable NN parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}')
 
         # Training
         for epoch in range(10):
