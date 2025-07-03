@@ -2763,6 +2763,10 @@ class ContinualLwF(luigi.Task):
 
 
 class ContinualSupervisedGMMWithBenignAveraging(luigi.Task):
+    """
+    Like Continual GMM but supporting Benign by averaging the GMM.
+    """
+
     dataset_name = luigi.Parameter()
     covariance_type = luigi.Parameter(default="full")
     reg_covar = luigi.FloatParameter(default=1e-6)

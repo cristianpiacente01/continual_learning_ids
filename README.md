@@ -258,3 +258,9 @@ Inspired by the paper "Learning without Forgetting" as the state of the art.
 `--temperature` is the non-negative temperature used for smoothing predictions (by default 2.0, doesn't make a difference to make it higher).
 
     python3 -m luigi --module pipeline ContinualLwF --dataset-name "CIC-IDS2017" --batch-size 128 --learning-rate 0.001 --lam 1.0 --temperature 2.0 --permute-tasks false --local-scheduler
+
+###### Continual Learning Supervised GMM Multi
+
+Like Continual GMM but supporting also benign data, by averaging the GMM.
+
+    python3 -m luigi --module pipeline ContinualSupervisedGMMWithBenignAveraging --dataset-name "CIC-IDS2017" --covariance-type "full" --reg-covar 1e-6 --n-components 3 --permute-tasks false --local-scheduler
