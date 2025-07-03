@@ -20,6 +20,7 @@ from sklearn.decomposition import TruncatedSVD
 import random
 from laplace.curvature.asdl import AsdlGGN
 from copy import deepcopy
+from sklearn.mixture._gaussian_mixture import _compute_precision_cholesky
 
 # Fix logging for Python 3.12.0
 logging.root.handlers.clear()
@@ -46,6 +47,7 @@ cfg = {
     'metrics_rel_filename': config.get('ExperimentsPipeline', 'metrics_rel_filename'),
     'nn_metrics_rel_filename': config.get('ExperimentsPipeline', 'nn_metrics_rel_filename'),
     'nn_multi_metrics_rel_filename': config.get('ExperimentsPipeline', 'nn_multi_metrics_rel_filename'),
+    'gmm_continual_multi_rel_filename': config.get('ExperimentsPipeline', 'gmm_continual_multi_rel_filename'),
     'continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'continual_metrics_rel_filename'),
     'bnn_continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'bnn_continual_metrics_rel_filename'),
     'bayesian_continual_metrics_rel_filename': config.get('ExperimentsPipeline', 'bayesian_continual_metrics_rel_filename'),
@@ -2758,3 +2760,185 @@ class ContinualLwF(luigi.Task):
             df.to_csv(f, mode='a', header=f.tell() == 0, index=False, lineterminator='\n')
         logger.info(f"Saved metrics to {csv_path}")
         logger.info(f"Finished task {self.__class__.__name__}")
+
+
+class ContinualSupervisedGMMWithBenignAveraging(luigi.Task):
+    dataset_name = luigi.Parameter()
+    covariance_type = luigi.Parameter(default="full")
+    reg_covar = luigi.FloatParameter(default=1e-6)
+    n_components = luigi.IntParameter(default=3)
+    permute_tasks = luigi.BoolParameter(default=False, parsing=luigi.BoolParameter.EXPLICIT_PARSING)
+
+    def requires(self):
+        class FakeTask(luigi.Task):
+            def output(inner_self):
+                return {
+                    'split-dataset': DirectoryTarget(get_full_dataset_rel_path(self.dataset_name, cfg['split_closed_set_rel_folder'])),
+                    'tasks': DirectoryTarget(get_full_dataset_rel_path(self.dataset_name, cfg['tasks_rel_folder']))
+                }
+        return FakeTask()
+
+    def run(self):
+        logger.info(f'Started task {self.__class__.__name__}')
+
+        split_path = self.input()['split-dataset'].path
+        tasks_path = self.input()['tasks'].path
+
+        test_df = pd.read_csv(os.path.join(split_path, "test.csv"))
+        task_files = sorted(glob.glob(os.path.join(tasks_path, "task_*.csv")))
+        if self.permute_tasks:
+            random.shuffle(task_files)
+
+        gmms = {}
+        label_map = {}
+        metrics = []
+        benign_gmms = []
+        benign_sample_counts = []
+        class_sample_counts = {}
+        benign_class_idx = 0
+        next_class_index = 1
+        first_task_mean = None
+        first_task_std = None
+
+        for i, task_file in enumerate(task_files):
+            task_df = pd.read_csv(task_file)
+            benign_df = task_df[task_df["attack_type"].str.lower().isin(["benign", "normal"])]
+            attack_df = task_df[~task_df["attack_type"].str.lower().isin(["benign", "normal"])]
+
+            current_attacks = set(attack_df["attack_type"].unique())
+            assert len(current_attacks) == 1, f"Task file {task_file} must contain exactly 1 attack type"
+            current_attack = current_attacks.pop()
+
+            if current_attack not in label_map:
+                label_map[current_attack] = next_class_index
+                next_class_index += 1
+
+            class_idx = label_map[current_attack]
+            X_train = attack_df.drop(columns=["attack", "attack_type"])
+            columns_to_normalize = [col for col in X_train.select_dtypes(include=['float', 'int']).columns]
+
+            if first_task_mean is None:
+                first_task_mean = X_train[columns_to_normalize].mean()
+                first_task_std = X_train[columns_to_normalize].std()
+
+            # Normalize benign
+            if not benign_df.empty:
+                X_benign = benign_df.drop(columns=["attack", "attack_type"])
+                for col in columns_to_normalize:
+                    mean = first_task_mean[col]
+                    std = first_task_std[col]
+                    X_benign[col] = 0.0 if pd.isna(std) or std < 1e-8 else (X_benign[col] - mean) / std
+                benign_gmm = GaussianMixture(
+                    n_components=self.n_components,
+                    covariance_type=self.covariance_type,
+                    reg_covar=self.reg_covar,
+                    random_state=42
+                ).fit(X_benign)
+                benign_gmms.append(benign_gmm)
+                benign_sample_counts.append(len(X_benign))
+
+            # Normalize attack samples
+            for col in columns_to_normalize:
+                mean = first_task_mean[col]
+                std = first_task_std[col]
+                X_train[col] = 0.0 if pd.isna(std) or std < 1e-8 else (X_train[col] - mean) / std
+
+            gmm = GaussianMixture(
+                n_components=self.n_components,
+                covariance_type=self.covariance_type,
+                reg_covar=self.reg_covar,
+                random_state=42
+            ).fit(X_train)
+            gmms[class_idx] = gmm
+
+            class_sample_counts[class_idx] = class_sample_counts.get(class_idx, 0) + len(X_train)
+            total_samples_seen = sum(class_sample_counts.values())
+
+            gmms[benign_class_idx] = self.merge_benign_gmms(benign_gmms, benign_sample_counts)
+
+            # Prepare test sets
+            test_seen_df = test_df[test_df["attack_type"].str.lower().isin(["benign", "normal"] + [a.lower() for a in label_map.keys()])]
+            label_map_with_benign = {attack.lower(): idx for attack, idx in label_map.items()}
+            label_map_with_benign.update({"benign": 0, "normal": 0})
+            y_test = test_seen_df["attack_type"].str.lower().map(label_map_with_benign)
+            for col in columns_to_normalize:
+                mean = first_task_mean[col]
+                std = first_task_std[col]
+                test_seen_df[col] = 0.0 if pd.isna(std) or std < 1e-8 else (test_seen_df[col] - mean) / std
+
+            test_current_df = test_df[test_df["attack_type"] == current_attack]
+            y_test_current = test_current_df["attack_type"].map(label_map)
+            for col in columns_to_normalize:
+                mean = first_task_mean[col]
+                std = first_task_std[col]
+                test_current_df[col] = 0.0 if pd.isna(std) or std < 1e-8 else (test_current_df[col] - mean) / std
+
+            previous_attacks = set(label_map.keys()) - {current_attack}
+            test_previous_df = test_df[test_df["attack_type"].isin(previous_attacks)] if i > 0 else None
+            if test_previous_df is not None and not test_previous_df.empty:
+                y_test_previous = test_previous_df["attack_type"].map(label_map)
+                for col in columns_to_normalize:
+                    mean = first_task_mean[col]
+                    std = first_task_std[col]
+                    test_previous_df[col] = 0.0 if pd.isna(std) or std < 1e-8 else (test_previous_df[col] - mean) / std
+            else:
+                y_test_previous = None
+
+            def eval_metrics(X, y, label):
+                class_indices = sorted(gmms.keys())
+                log_likelihoods = np.zeros((X.shape[0], len(class_indices)))
+                for idx, gmm_class_idx in enumerate(class_indices):
+                    gmm_model = gmms[gmm_class_idx]
+                    log_likelihood = gmm_model.score_samples(X)
+                    prior_prob = class_sample_counts.get(gmm_class_idx, 1e-8) / total_samples_seen
+                    log_prior = np.log(prior_prob)
+                    log_likelihoods[:, idx] = log_likelihood + log_prior
+                index_mapping = {gmm_class_idx: idx for idx, gmm_class_idx in enumerate(class_indices)}
+                y_mapped = y.map(index_mapping)
+                acc = accuracy_score(y_mapped, np.argmax(log_likelihoods, axis=1))
+                logger.info(f'[TASK {i+1}] {label} accuracy: {acc:.4f}')
+                return {
+                    'accuracy': acc,
+                    'f1_macro': f1_score(y_mapped, np.argmax(log_likelihoods, axis=1), average="macro", zero_division=0),
+                    'f1_weighted': f1_score(y_mapped, np.argmax(log_likelihoods, axis=1), average="weighted", zero_division=0)
+                }
+
+            metrics_cumulative = eval_metrics(test_seen_df.drop(columns=["attack", "attack_type"]), y_test, "CUMULATIVE")
+            metrics_current = eval_metrics(test_current_df.drop(columns=["attack", "attack_type"]), y_test_current, "CURRENT")
+            metrics_previous = {metric: None for metric in ['accuracy', 'f1_macro', 'f1_weighted']} if y_test_previous is None else \
+                eval_metrics(test_previous_df.drop(columns=["attack", "attack_type"]), y_test_previous, "PREVIOUS")
+
+            metrics.append({
+                "dataset": self.dataset_name,
+                "n_components": self.n_components,
+                "covariance_type": self.covariance_type,
+                "reg_covar": self.reg_covar,
+                "permute_tasks": self.permute_tasks,
+                "task": i + 1,
+                "attack": current_attack,
+                **{f'cumulative_{k}': v for k, v in metrics_cumulative.items()},
+                **{f'current_{k}': v for k, v in metrics_current.items()},
+                **{f'previous_{k}': v for k, v in metrics_previous.items()}
+            })
+
+        gmms[benign_class_idx] = self.merge_benign_gmms(benign_gmms, benign_sample_counts)
+
+        metrics_csv = get_full_model_rel_path(self.dataset_name, cfg['gmm_continual_multi_rel_filename'])
+        os.makedirs(os.path.dirname(metrics_csv), exist_ok=True)
+        metrics_df = pd.DataFrame(metrics)
+        with open(metrics_csv, 'a') as f:
+            metrics_df.to_csv(f, mode='a', header=f.tell() == 0, index=False, lineterminator='\n')
+
+        logger.info(f'Saved metrics to {metrics_csv}')
+        logger.info(f'Finished task {self.__class__.__name__}')
+
+    @staticmethod
+    def merge_benign_gmms(benign_gmms, sample_counts):
+        total_samples = sum(sample_counts)
+        merged = deepcopy(benign_gmms[0])
+        merged.weights_ = sum(gmm.weights_ * (n / total_samples) for gmm, n in zip(benign_gmms, sample_counts))
+        merged.means_ = sum(gmm.means_ * (n / total_samples) for gmm, n in zip(benign_gmms, sample_counts))
+        merged.covariances_ = sum(gmm.covariances_ * (n / total_samples) for gmm, n in zip(benign_gmms, sample_counts))
+        merged.precisions_cholesky_ = _compute_precision_cholesky(merged.covariances_, merged.covariance_type)
+        return merged
+
